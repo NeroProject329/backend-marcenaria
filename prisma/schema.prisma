@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  phone     String?
+  password  String
+  createdAt DateTime @default(now())
+
+  salon     Salon?
+}
+
+model Salon {
+  id        String   @id @default(cuid())
+  name      String
+  address   String?
+  phone     String?
+  createdAt DateTime @default(now())
+
+  ownerId   String   @unique
+  owner     User     @relation(fields: [ownerId], references: [id])
+
+  services      Service[]
+  clients       Client[]
+  appointments  Appointment[]
+}
+
+model Service {
+  id        String   @id @default(cuid())
+  name      String
+  category  String?
+  price     Int      // em centavos (ex: R$ 49,90 = 4990)
+  durationM Int      // duração em minutos
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  salonId   String
+  salon     Salon    @relation(fields: [salonId], references: [id])
+}
+
+model Client {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String
+  instagram String?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  salonId   String
+  salon     Salon    @relation(fields: [salonId], references: [id])
+
+  appointments Appointment[]
+}
+
+model Appointment {
+  id        String   @id @default(cuid())
+  startAt   DateTime
+  endAt     DateTime
+  status    String   @default("PENDENTE") // PENDENTE|CONFIRMADO|FINALIZADO|CANCELADO
+  notes     String?
+  createdAt DateTime @default(now())
+
+  salonId   String
+  salon     Salon    @relation(fields: [salonId], references: [id])
+
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id])
+}
