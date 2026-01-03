@@ -10,7 +10,7 @@ const {
 router.use(requireAuth);
 
 router.get("/", listServices);
-router.post("/", createService);
+router.post("/", requireAuth, checkLimit("services"), createService);
 router.patch("/:id", updateService);
 router.delete("/:id", disableService);
 

@@ -20,4 +20,5 @@ app.use("/api/clients", clientsRoutes);
 app.use("/api/appointments", appointmentsRoutes);
 app.use("/api/finance", financeRoutes);
 
+
 module.exports = { app };

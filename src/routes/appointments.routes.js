@@ -10,7 +10,7 @@ const {
 router.use(requireAuth);
 
 router.get("/", listAppointments);
-router.post("/", createAppointment);
+router.post("/", requireAuth, checkLimit("appointmentsMonth"), createAppointment);
 router.patch("/:id", updateAppointment);
 router.delete("/:id", deleteAppointment);
 

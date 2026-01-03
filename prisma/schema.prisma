@@ -27,10 +27,19 @@ model Salon {
   ownerId String @unique
   owner   User   @relation(fields: [ownerId], references: [id])
 
+  // ✅ Plano
+  plan        String   @default("FREE")        // FREE | PRO | PREMIUM
+  planStatus  String   @default("ACTIVE")      // ACTIVE | PAST_DUE | CANCELED
+  planEndsAt  DateTime?                        // quando expira (se tiver)
+  trialEndsAt DateTime?                        // opcional: trial
+
   services     Service[]
   clients      Client[]
   appointments Appointment[]
+
+  @@index([plan, planStatus])
 }
+
 
 model Service {
   id        String   @id @default(cuid())
