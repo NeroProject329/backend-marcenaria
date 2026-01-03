@@ -2,12 +2,12 @@
   "name": "backend-stetic-pro-gestao",
   "version": "1.0.0",
   "main": "index.js",
-   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
-    "postinstall": "prisma generate",
-    "migrate:deploy": "prisma migrate deploy"
-  },
+  "scripts": {
+  "start": "node src/server.js",
+  "migrate:deploy": "node node_modules/prisma/build/index.js migrate deploy",
+  "prisma:generate": "node node_modules/prisma/build/index.js generate",
+  "postinstall": "npm run prisma:generate"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
