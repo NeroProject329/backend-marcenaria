@@ -157,9 +157,82 @@ async function deleteClient(req, res) {
   return res.json({ ok: true });
 }
 
+async function listClientsWithMetrics(req, res) {
+  const { salonId } = req.user;
+
+  const clients = await prisma.client.findMany({
+    where: { salonId },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      createdAt: true,
+      appointments: {
+        select: {
+          status: true,
+          startAt: true,
+          service: { select: { price: true } },
+        },
+      },
+    },
+  });
+
+  const result = clients.map((client) => {
+    const finalized = client.appointments.filter(
+      (a) => a.status === "FINALIZADO"
+    );
+
+    const canceled = client.appointments.filter(
+      (a) => a.status === "CANCELADO"
+    );
+
+    const totalSpent = finalized.reduce(
+      (sum, a) => sum + (a.service?.price || 0),
+      0
+    );
+
+    const lastVisit =
+      finalized.length > 0
+        ? finalized.reduce((latest, a) =>
+            a.startAt > latest ? a.startAt : latest
+          , finalized[0].startAt)
+        : null;
+
+    const monthsActive = finalized.length
+      ? Math.max(
+          1,
+          Math.ceil(
+            (Date.now() - new Date(finalized[0].startAt)) /
+              (1000 * 60 * 60 * 24 * 30)
+          )
+        )
+      : 1;
+
+    const frequency = finalized.length
+      ? Number((finalized.length / monthsActive).toFixed(1))
+      : 0;
+
+    return {
+      id: client.id,
+      name: client.name,
+      phone: client.phone,
+      totalSpent,
+      visits: finalized.length,
+      lastVisit,
+      canceled: canceled.length,
+      frequency,
+    };
+  });
+
+  return res.json({ clients: result });
+}
+
+
 module.exports = {
   listClients,
   createClient,
   updateClient,
   deleteClient,
+  listClientsWithMetrics,
 };

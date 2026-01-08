@@ -6,9 +6,10 @@ const {
   updateClient,
   deleteClient,
 } = require("../controllers/clients.controller");
-const { checkLimit } = require("../middlewares/plan.middleware"); // ✅ ADICIONA ISSO
+const { checkLimit } = require("../middlewares/plan.middleware"); 
 
 router.use(requireAuth);
+router.get("/metrics", listClientsWithMetrics);
 
 router.get("/", listClients);
 router.post("/", requireAuth, checkLimit("clients"), createClient);
