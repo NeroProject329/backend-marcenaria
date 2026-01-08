@@ -5,6 +5,7 @@ const {
   createClient,
   updateClient,
   deleteClient,
+  listClientsWithMetrics,
 } = require("../controllers/clients.controller");
 const { checkLimit } = require("../middlewares/plan.middleware"); 
 
