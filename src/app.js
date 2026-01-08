@@ -8,6 +8,7 @@ const clientsRoutes = require("./routes/clients.routes");
 const appointmentsRoutes = require("./routes/appointments.routes");
 const financeRoutes = require("./routes/finance.routes");
 const settingsRoutes = require("./routes/settings.routes");
+const adminRoutes = require("./routes/admin.routes");
 
 const app = express();
 app.use(cors());
@@ -21,6 +22,8 @@ app.use("/api/clients", clientsRoutes);
 app.use("/api/appointments", appointmentsRoutes);
 app.use("/api/finance", financeRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/admin", adminRoutes);
+
 
 
 module.exports = { app };
