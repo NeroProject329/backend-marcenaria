@@ -10,6 +10,17 @@ function toInt(v, field) {
   return { ok: true, value: n };
 }
 
+function monthRange(monthStr) {
+  const [y, m] = String(monthStr || "").split("-").map(Number);
+  if (!y || !m || m < 1 || m > 12) return null;
+
+  // UTC pra evitar “pular dia” por timezone
+  const from = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0));
+  const to = new Date(Date.UTC(y, m, 1, 0, 0, 0));
+  return { from, to };
+}
+
+
 function toDate(v, field) {
   const d = new Date(v);
   if (!v || Number.isNaN(d.getTime())) {
@@ -242,10 +253,61 @@ async function deleteCost(req, res) {
   return res.json({ ok: true });
 }
 
+async function costSummary(req, res) {
+  const { salonId } = req.user;
+
+  const month = String(req.query.month || "").trim();
+  const range = monthRange(month);
+  if (!range) {
+    return res.status(400).json({ message: "month inválido. Use YYYY-MM" });
+  }
+
+  const workDaysRaw = req.query.workDays;
+  const workDays = workDaysRaw ? Number(workDaysRaw) : 22;
+  if (!Number.isFinite(workDays) || workDays <= 0 || !Number.isInteger(workDays)) {
+    return res.status(400).json({ message: "workDays inválido (inteiro > 0)." });
+  }
+
+  // busca custos do mês
+  const costs = await prisma.cost.findMany({
+    where: {
+      salonId,
+      occurredAt: { gte: range.from, lt: range.to },
+    },
+    select: { type: true, amountCents: true },
+  });
+
+  const fixedCents = costs
+    .filter((c) => c.type === "FIXO")
+    .reduce((a, c) => a + (c.amountCents || 0), 0);
+
+  const variableCents = costs
+    .filter((c) => c.type === "VARIAVEL")
+    .reduce((a, c) => a + (c.amountCents || 0), 0);
+
+  const totalCents = fixedCents + variableCents;
+
+  // custo diário (arredonda para inteiro em centavos)
+  const dailyCents = Math.round(totalCents / workDays);
+
+  return res.json({
+    month,
+    workDays,
+    totals: {
+      fixedCents,
+      variableCents,
+      totalCents,
+      dailyCents,
+    },
+  });
+}
+
+
 module.exports = {
   listCosts,
   getCost,
   createCost,
   updateCost,
   deleteCost,
+  costSummary, // ✅ novo
 };
