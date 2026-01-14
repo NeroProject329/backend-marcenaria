@@ -1,6 +1,6 @@
 const { prisma } = require("../lib/prisma");
 
-// helpers
+// ===== Helpers =====
 function toInt(v, field) {
   const n = Number(v);
   if (!Number.isFinite(n) || !Number.isInteger(n)) {
@@ -29,7 +29,6 @@ function normalizeStatus(v) {
   return allowed.has(s) ? s : null;
 }
 
-// pagamentos
 const VALID_PAYMENT_MODE = new Set(["AVISTA", "PARCELADO"]);
 const VALID_PAYMENT_METHOD = new Set([
   "PIX",
@@ -59,7 +58,6 @@ function toBool(v) {
   return s === "true" || s === "1" || s === "yes";
 }
 
-// totais
 function calcTotals(items, discountCents = 0) {
   const subtotal = items.reduce((sum, it) => sum + it.totalCents, 0);
   const total = Math.max(0, subtotal - (discountCents || 0));
@@ -70,40 +68,158 @@ function addMonths(date, months) {
   const d = new Date(date);
   const day = d.getDate();
   d.setMonth(d.getMonth() + months);
-
-  // evita "pular" (ex.: 31 -> fevereiro)
   while (d.getDate() < day) d.setDate(d.getDate() - 1);
   return d;
 }
 
-// Divide total em N parcelas, garantindo soma exata (última recebe o resto)
 function splitIntoInstallments(totalCents, count) {
   const base = Math.floor(totalCents / count);
   const remainder = totalCents - base * count;
-
   const arr = Array.from({ length: count }, () => base);
   arr[count - 1] = base + remainder;
   return arr;
 }
 
-/**
- * ✅ CREATE ORDER + AUTO RECEIVABLES (com pagamento no Order + paidNow)
- * POST /api/orders
- *
- * body:
- *  - clientId (obrigatório)
- *  - items (obrigatório)
- *  - discountCents?
- *  - expectedDeliveryAt?
- *  - status?
- *  - notes?
- *
- *  - paymentMode?: "AVISTA" | "PARCELADO" (default AVISTA)
- *  - paymentMethod?: "PIX" | "CARTAO" | ...
- *  - installmentsCount?: number (obrigatório se PARCELADO)
- *  - firstDueDate?: ISO date (se não vier: usa expectedDeliveryAt ou hoje)
- *  - paidNow?: boolean (somente se AVISTA) -> parcela 1 já nasce PAGO
- */
+// ===== Controllers =====
+
+// GET /api/orders
+async function listOrders(req, res) {
+  const { salonId } = req.user;
+  const q = (req.query.q || "").trim();
+
+  const status = normalizeStatus(req.query.status);
+  if (req.query.status && status === null) {
+    return res.status(400).json({ message: "Status inválido." });
+  }
+
+  const where = { salonId };
+  if (status) where.status = status;
+
+  if (q) {
+    where.OR = [
+      { client: { name: { contains: q, mode: "insensitive" } } },
+      { client: { phone: { contains: q.replace(/\D/g, "") } } },
+      { notes: { contains: q, mode: "insensitive" } },
+    ];
+  }
+
+  const orders = await prisma.order.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      status: true,
+      createdAt: true,
+      expectedDeliveryAt: true,
+      deliveredAt: true,
+      subtotalCents: true,
+      discountCents: true,
+      totalCents: true,
+      notes: true,
+
+      // pagamento no Order
+      paymentMode: true,
+      paymentMethod: true,
+      installmentsCount: true,
+      firstDueDate: true,
+
+      client: { select: { id: true, name: true, phone: true, type: true } },
+      items: {
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          quantity: true,
+          unitPriceCents: true,
+          totalCents: true,
+        },
+      },
+    },
+  });
+
+  return res.json({ orders });
+}
+
+// GET /api/orders/:id
+async function getOrder(req, res) {
+  const { salonId } = req.user;
+  const { id } = req.params;
+
+  const order = await prisma.order.findFirst({
+    where: { id, salonId },
+    select: {
+      id: true,
+      status: true,
+      createdAt: true,
+      updatedAt: true,
+      expectedDeliveryAt: true,
+      deliveredAt: true,
+      subtotalCents: true,
+      discountCents: true,
+      totalCents: true,
+      notes: true,
+
+      // pagamento no Order
+      paymentMode: true,
+      paymentMethod: true,
+      installmentsCount: true,
+      firstDueDate: true,
+
+      client: {
+        select: { id: true, name: true, phone: true, instagram: true, notes: true, type: true },
+      },
+      items: {
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          quantity: true,
+          unitPriceCents: true,
+          totalCents: true,
+        },
+      },
+      deliveries: {
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          status: true,
+          expectedAt: true,
+          deliveredAt: true,
+          address: true,
+          notes: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      },
+      receivables: {
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          totalCents: true,
+          method: true,
+          createdAt: true,
+          installments: {
+            orderBy: { number: "asc" },
+            select: {
+              id: true,
+              number: true,
+              dueDate: true,
+              amountCents: true,
+              status: true,
+              paidAt: true,
+              method: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!order) return res.status(404).json({ message: "Pedido não encontrado." });
+  return res.json({ order });
+}
+
+// POST /api/orders
 async function createOrder(req, res) {
   const { salonId } = req.user;
 
@@ -115,19 +231,14 @@ async function createOrder(req, res) {
     discountCents,
     items,
 
-    // pagamento
     paymentMode,
     paymentMethod,
     installmentsCount,
     firstDueDate,
-
-    // ✅ novo
     paidNow,
   } = req.body;
 
-  if (!clientId) {
-    return res.status(400).json({ message: "clientId é obrigatório." });
-  }
+  if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
 
   const client = await prisma.client.findFirst({
     where: { id: clientId, salonId },
@@ -136,9 +247,7 @@ async function createOrder(req, res) {
   if (!client) return res.status(404).json({ message: "Cliente não encontrado." });
 
   const statusNorm = status ? normalizeStatus(status) : "ORCAMENTO";
-  if (status && statusNorm === null) {
-    return res.status(400).json({ message: "Status inválido." });
-  }
+  if (status && statusNorm === null) return res.status(400).json({ message: "Status inválido." });
 
   const exp = toDateOrNull(expectedDeliveryAt);
   if (expectedDeliveryAt && !exp) {
@@ -155,14 +264,12 @@ async function createOrder(req, res) {
     return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
   }
 
-  // normaliza itens
+  // itens
   const itemsNorm = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i] || {};
     const name = String(it.name || "").trim();
-    if (name.length < 2) {
-      return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
-    }
+    if (name.length < 2) return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
 
     const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
     if (!q.ok) return res.status(400).json({ message: q.message });
@@ -172,20 +279,18 @@ async function createOrder(req, res) {
     if (!up.ok) return res.status(400).json({ message: up.message });
     if (up.value < 0) return res.status(400).json({ message: `Item ${i + 1}: unitPriceCents inválido.` });
 
-    const totalCents = q.value * up.value;
-
     itemsNorm.push({
       name,
       description: it.description ? String(it.description).trim() : null,
       quantity: q.value,
       unitPriceCents: up.value,
-      totalCents,
+      totalCents: q.value * up.value,
     });
   }
 
   const totals = calcTotals(itemsNorm, disc.value);
 
-  // pagamento: mode e method
+  // pagamento
   const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
   if (paymentMode !== undefined && modeNorm === null) {
     return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
@@ -206,40 +311,29 @@ async function createOrder(req, res) {
     count = c.value;
   }
 
-  // firstDueDate
   const parsedFirst = toDateOrNull(firstDueDate);
   if (firstDueDate && !parsedFirst) {
     return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
   }
-
   const baseDue = parsedFirst || exp || new Date();
 
-  // ✅ paidNow só vale para AVISTA
   const paidNowBool = modeNorm === "AVISTA" ? toBool(paidNow) : false;
-
-  // gera parcelas automaticamente
-  const amounts = splitIntoInstallments(totals.totalCents, count);
-
   const now = new Date();
 
+  const amounts = splitIntoInstallments(totals.totalCents, count);
   const installmentsData = amounts.map((amt, idx) => {
     const isFirst = idx === 0;
-
-    // se AVISTA + paidNow -> 1ª parcela nasce PAGO
-    const status = (paidNowBool && isFirst) ? "PAGO" : "PENDENTE";
-    const paidAt = (paidNowBool && isFirst) ? now : null;
-
+    const isPaid = paidNowBool && isFirst;
     return {
       number: idx + 1,
       dueDate: addMonths(baseDue, idx),
       amountCents: amt,
-      status,
-      paidAt,
+      status: isPaid ? "PAGO" : "PENDENTE",
+      paidAt: isPaid ? now : null,
       method: methodNorm || null,
     };
   });
 
-  // cria Order + Receivable numa transaction
   const created = await prisma.$transaction(async (tx) => {
     const order = await tx.order.create({
       data: {
@@ -252,7 +346,7 @@ async function createOrder(req, res) {
         subtotalCents: totals.subtotalCents,
         totalCents: totals.totalCents,
 
-        // ✅ salvar pagamento no Order (precisa estar no schema)
+        // ✅ esses campos precisam existir no schema
         paymentMode: modeNorm,
         paymentMethod: methodNorm || null,
         installmentsCount: count,
@@ -268,23 +362,15 @@ async function createOrder(req, res) {
         subtotalCents: true,
         discountCents: true,
         totalCents: true,
+        notes: true,
 
-        // ✅ retornar pagamento do Order
         paymentMode: true,
         paymentMethod: true,
         installmentsCount: true,
         firstDueDate: true,
 
         client: { select: { id: true, name: true, phone: true, type: true } },
-        items: {
-          select: {
-            id: true,
-            name: true,
-            quantity: true,
-            unitPriceCents: true,
-            totalCents: true,
-          },
-        },
+        items: { select: { id: true, name: true, quantity: true, unitPriceCents: true, totalCents: true } },
       },
     });
 
@@ -302,15 +388,7 @@ async function createOrder(req, res) {
         method: true,
         installments: {
           orderBy: { number: "asc" },
-          select: {
-            id: true,
-            number: true,
-            dueDate: true,
-            amountCents: true,
-            status: true,
-            paidAt: true,
-            method: true,
-          },
+          select: { id: true, number: true, dueDate: true, amountCents: true, status: true, paidAt: true, method: true },
         },
       },
     });
@@ -321,7 +399,81 @@ async function createOrder(req, res) {
   return res.status(201).json(created);
 }
 
-module.exports = {
-  createOrder,
-};
+// PATCH /api/orders/:id
+async function updateOrder(req, res) {
+  const { salonId } = req.user;
+  const { id } = req.params;
 
+  const exists = await prisma.order.findFirst({
+    where: { id, salonId },
+    select: { id: true },
+  });
+  if (!exists) return res.status(404).json({ message: "Pedido não encontrado." });
+
+  const { status, expectedDeliveryAt, deliveredAt, notes } = req.body;
+  const data = {};
+
+  if (status !== undefined) {
+    const s = normalizeStatus(status);
+    if (s === null) return res.status(400).json({ message: "Status inválido." });
+    data.status = s;
+    if (s === "ENTREGUE" && deliveredAt === undefined) data.deliveredAt = new Date();
+  }
+
+  if (expectedDeliveryAt !== undefined) {
+    const d = toDateOrNull(expectedDeliveryAt);
+    if (expectedDeliveryAt && !d) return res.status(400).json({ message: "expectedDeliveryAt inválido." });
+    data.expectedDeliveryAt = d;
+  }
+
+  if (deliveredAt !== undefined) {
+    const d = toDateOrNull(deliveredAt);
+    if (deliveredAt && !d) return res.status(400).json({ message: "deliveredAt inválido." });
+    data.deliveredAt = d;
+  }
+
+  if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
+
+  const updated = await prisma.order.update({
+    where: { id },
+    data,
+    select: {
+      id: true,
+      status: true,
+      updatedAt: true,
+      expectedDeliveryAt: true,
+      deliveredAt: true,
+      notes: true,
+    },
+  });
+
+  return res.json({ order: updated });
+}
+
+// POST /api/orders/:id/cancel
+async function cancelOrder(req, res) {
+  const { salonId } = req.user;
+  const { id } = req.params;
+
+  const exists = await prisma.order.findFirst({
+    where: { id, salonId },
+    select: { id: true },
+  });
+  if (!exists) return res.status(404).json({ message: "Pedido não encontrado." });
+
+  const order = await prisma.order.update({
+    where: { id },
+    data: { status: "CANCELADO" },
+    select: { id: true, status: true },
+  });
+
+  return res.json({ order });
+}
+
+module.exports = {
+  listOrders,
+  getOrder,
+  createOrder,
+  updateOrder,
+  cancelOrder,
+};
