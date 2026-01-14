@@ -29,6 +29,7 @@ function normalizeStatus(v) {
   return allowed.has(s) ? s : null;
 }
 
+// pagamentos
 const VALID_PAYMENT_MODE = new Set(["AVISTA", "PARCELADO"]);
 const VALID_PAYMENT_METHOD = new Set([
   "PIX",
@@ -51,6 +52,14 @@ function normalizePaymentMethod(v) {
   return VALID_PAYMENT_METHOD.has(m) ? m : null;
 }
 
+function toBool(v) {
+  if (v === true || v === false) return v;
+  if (v === undefined || v === null) return false;
+  const s = String(v).trim().toLowerCase();
+  return s === "true" || s === "1" || s === "yes";
+}
+
+// totais
 function calcTotals(items, discountCents = 0) {
   const subtotal = items.reduce((sum, it) => sum + it.totalCents, 0);
   const total = Math.max(0, subtotal - (discountCents || 0));
@@ -62,8 +71,7 @@ function addMonths(date, months) {
   const day = d.getDate();
   d.setMonth(d.getMonth() + months);
 
-  // Ajuste simples pra evitar "pular" quando o mês não tem o mesmo dia
-  // Ex: 31 -> fevereiro
+  // evita "pular" (ex.: 31 -> fevereiro)
   while (d.getDate() < day) d.setDate(d.getDate() - 1);
   return d;
 }
@@ -79,8 +87,9 @@ function splitIntoInstallments(totalCents, count) {
 }
 
 /**
- * ✅ CREATE ORDER + AUTO RECEIVABLES
+ * ✅ CREATE ORDER + AUTO RECEIVABLES (com pagamento no Order + paidNow)
  * POST /api/orders
+ *
  * body:
  *  - clientId (obrigatório)
  *  - items (obrigatório)
@@ -88,10 +97,12 @@ function splitIntoInstallments(totalCents, count) {
  *  - expectedDeliveryAt?
  *  - status?
  *  - notes?
- *  - paymentMode?: "AVISTA" | "PARCELADO"
- *  - paymentMethod?: "PIX" | ...
- *  - installmentsCount?: number (se PARCELADO)
+ *
+ *  - paymentMode?: "AVISTA" | "PARCELADO" (default AVISTA)
+ *  - paymentMethod?: "PIX" | "CARTAO" | ...
+ *  - installmentsCount?: number (obrigatório se PARCELADO)
  *  - firstDueDate?: ISO date (se não vier: usa expectedDeliveryAt ou hoje)
+ *  - paidNow?: boolean (somente se AVISTA) -> parcela 1 já nasce PAGO
  */
 async function createOrder(req, res) {
   const { salonId } = req.user;
@@ -104,14 +115,19 @@ async function createOrder(req, res) {
     discountCents,
     items,
 
-    // 🔥 novos campos
+    // pagamento
     paymentMode,
     paymentMethod,
     installmentsCount,
     firstDueDate,
+
+    // ✅ novo
+    paidNow,
   } = req.body;
 
-  if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
+  if (!clientId) {
+    return res.status(400).json({ message: "clientId é obrigatório." });
+  }
 
   const client = await prisma.client.findFirst({
     where: { id: clientId, salonId },
@@ -120,7 +136,9 @@ async function createOrder(req, res) {
   if (!client) return res.status(404).json({ message: "Cliente não encontrado." });
 
   const statusNorm = status ? normalizeStatus(status) : "ORCAMENTO";
-  if (status && statusNorm === null) return res.status(400).json({ message: "Status inválido." });
+  if (status && statusNorm === null) {
+    return res.status(400).json({ message: "Status inválido." });
+  }
 
   const exp = toDateOrNull(expectedDeliveryAt);
   if (expectedDeliveryAt && !exp) {
@@ -137,12 +155,14 @@ async function createOrder(req, res) {
     return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
   }
 
-  // normaliza itens e calcula totais
+  // normaliza itens
   const itemsNorm = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i] || {};
     const name = String(it.name || "").trim();
-    if (name.length < 2) return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
+    if (name.length < 2) {
+      return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
+    }
 
     const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
     if (!q.ok) return res.status(400).json({ message: q.message });
@@ -165,10 +185,10 @@ async function createOrder(req, res) {
 
   const totals = calcTotals(itemsNorm, disc.value);
 
-  // ✅ novos campos: validação de pagamento
+  // pagamento: mode e method
   const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
   if (paymentMode !== undefined && modeNorm === null) {
-    return res.status(400).json({ message: 'paymentMode inválido (AVISTA ou PARCELADO).' });
+    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
   }
 
   const methodNorm = normalizePaymentMethod(paymentMethod);
@@ -186,26 +206,38 @@ async function createOrder(req, res) {
     count = c.value;
   }
 
-  // base da 1ª parcela:
-  // prioridade: firstDueDate -> expectedDeliveryAt -> hoje
-  const baseDue =
-    toDateOrNull(firstDueDate) ||
-    exp ||
-    new Date();
-
-  if (firstDueDate && !toDateOrNull(firstDueDate)) {
+  // firstDueDate
+  const parsedFirst = toDateOrNull(firstDueDate);
+  if (firstDueDate && !parsedFirst) {
     return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
   }
 
+  const baseDue = parsedFirst || exp || new Date();
+
+  // ✅ paidNow só vale para AVISTA
+  const paidNowBool = modeNorm === "AVISTA" ? toBool(paidNow) : false;
+
   // gera parcelas automaticamente
   const amounts = splitIntoInstallments(totals.totalCents, count);
-  const installmentsData = amounts.map((amt, idx) => ({
-    number: idx + 1,
-    dueDate: addMonths(baseDue, idx),
-    amountCents: amt,
-    status: "PENDENTE",             // ✅ padrão (mais seguro)
-    method: methodNorm || null,
-  }));
+
+  const now = new Date();
+
+  const installmentsData = amounts.map((amt, idx) => {
+    const isFirst = idx === 0;
+
+    // se AVISTA + paidNow -> 1ª parcela nasce PAGO
+    const status = (paidNowBool && isFirst) ? "PAGO" : "PENDENTE";
+    const paidAt = (paidNowBool && isFirst) ? now : null;
+
+    return {
+      number: idx + 1,
+      dueDate: addMonths(baseDue, idx),
+      amountCents: amt,
+      status,
+      paidAt,
+      method: methodNorm || null,
+    };
+  });
 
   // cria Order + Receivable numa transaction
   const created = await prisma.$transaction(async (tx) => {
@@ -219,6 +251,13 @@ async function createOrder(req, res) {
         discountCents: disc.value,
         subtotalCents: totals.subtotalCents,
         totalCents: totals.totalCents,
+
+        // ✅ salvar pagamento no Order (precisa estar no schema)
+        paymentMode: modeNorm,
+        paymentMethod: methodNorm || null,
+        installmentsCount: count,
+        firstDueDate: baseDue,
+
         items: { create: itemsNorm },
       },
       select: {
@@ -229,8 +268,23 @@ async function createOrder(req, res) {
         subtotalCents: true,
         discountCents: true,
         totalCents: true,
+
+        // ✅ retornar pagamento do Order
+        paymentMode: true,
+        paymentMethod: true,
+        installmentsCount: true,
+        firstDueDate: true,
+
         client: { select: { id: true, name: true, phone: true, type: true } },
-        items: { select: { id: true, name: true, quantity: true, unitPriceCents: true, totalCents: true } },
+        items: {
+          select: {
+            id: true,
+            name: true,
+            quantity: true,
+            unitPriceCents: true,
+            totalCents: true,
+          },
+        },
       },
     });
 
@@ -248,7 +302,15 @@ async function createOrder(req, res) {
         method: true,
         installments: {
           orderBy: { number: "asc" },
-          select: { id: true, number: true, dueDate: true, amountCents: true, status: true, paidAt: true, method: true },
+          select: {
+            id: true,
+            number: true,
+            dueDate: true,
+            amountCents: true,
+            status: true,
+            paidAt: true,
+            method: true,
+          },
         },
       },
     });
@@ -260,7 +322,6 @@ async function createOrder(req, res) {
 }
 
 module.exports = {
-  // ... mantenha os outros exports que já existem no seu controller:
-  // listOrders, getOrder, updateOrder, cancelOrder,
   createOrder,
 };
+

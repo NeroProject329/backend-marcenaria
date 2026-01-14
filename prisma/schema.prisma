@@ -54,6 +54,11 @@ enum PaymentMethod {
   OUTRO
 }
 
+enum PaymentMode {
+  AVISTA
+  PARCELADO
+}
+
 model User {
   id        String   @id @default(cuid())
   name      String
@@ -216,7 +221,6 @@ model Order {
   clientId String
   client   Client @relation(fields: [clientId], references: [id])
 
-  // multi-tenant: reaproveita "Salon" como empresa/unidade
   salonId String
   salon   Salon  @relation(fields: [salonId], references: [id])
 
@@ -224,6 +228,12 @@ model Order {
   subtotalCents Int @default(0)
   discountCents Int @default(0)
   totalCents    Int @default(0)
+
+  // ✅ pagamento
+  paymentMode       PaymentMode    @default(AVISTA)
+  paymentMethod     PaymentMethod?
+  installmentsCount Int            @default(1)
+  firstDueDate      DateTime?
 
   // previsão/entrega
   expectedDeliveryAt DateTime?
