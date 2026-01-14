@@ -10,6 +10,8 @@ const financeRoutes = require("./routes/finance.routes");
 const settingsRoutes = require("./routes/settings.routes");
 const adminRoutes = require("./routes/admin.routes");
 const meRoutes = require("./routes/me.routes");
+const ordersRoutes = require("./routes/orders.routes");
+
 
 const app = express();
 app.use(cors());
@@ -25,6 +27,8 @@ app.use("/api/finance", financeRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/me", meRoutes);
+app.use("/api/orders", ordersRoutes);
+
 
 
 
