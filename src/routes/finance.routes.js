@@ -5,6 +5,9 @@ const { checkLimit } = require("../middlewares/plan.middleware");
 const {
   financeSummary,
   financeFlow,
+  financeCashflow,        // ✅ add
+  receivablesByMonth,     // ✅ add
+  payablesByMonth,        // ✅ add
   listCategories,
   createCategory,
   listTransactions,
@@ -32,5 +35,14 @@ router.get("/transactions", checkLimit("finance"), listTransactions);
 router.post("/transactions", checkLimit("finance"), createTransaction);
 router.patch("/transactions/:id", checkLimit("finance"), updateTransaction);
 router.delete("/transactions/:id", checkLimit("finance"), deleteTransaction);
+
+// ✅ NOVO: fluxo de caixa com saldo anterior (Marcenaria)
+router.get("/cashflow", checkLimit("finance"), financeCashflow);
+
+// ✅ NOVO: recebimentos por mês (parcelas)
+router.get("/receivables/month", checkLimit("finance"), receivablesByMonth);
+
+// ✅ NOVO: pagamentos por mês (parcelas)
+router.get("/payables/month", checkLimit("finance"), payablesByMonth);
 
 module.exports = router;

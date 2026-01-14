@@ -123,6 +123,256 @@ async function financeFlow(req, res) {
   return res.json({ flow });
 }
 
+function monthRange(monthStr) {
+  // monthStr: "YYYY-MM"
+  const [y, m] = String(monthStr || "").split("-").map(Number);
+  if (!y || !m || m < 1 || m > 12) return null;
+  const from = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0));
+  const to = new Date(Date.UTC(y, m, 1, 0, 0, 0));
+  return { from, to };
+}
+
+async function sumLegacyAutoInAppointments({ salonId, from, to }) {
+  // legado (salão): FINALIZADO entra
+  const appts = await prisma.appointment.findMany({
+    where: { salonId, status: "FINALIZADO", startAt: { gte: from, lt: to } },
+    select: { service: { select: { price: true } } },
+  });
+  return appts.reduce((acc, a) => acc + (a.service?.price || 0), 0);
+}
+
+async function sumManualTx({ salonId, from, to }) {
+  const tx = await prisma.cashTransaction.findMany({
+    where: { salonId, occurredAt: { gte: from, lt: to }, source: "MANUAL" },
+    select: { type: true, amountCents: true },
+  });
+
+  const manualIn = tx.filter((t) => t.type === "IN").reduce((a, t) => a + (t.amountCents || 0), 0);
+  const manualOut = tx.filter((t) => t.type === "OUT").reduce((a, t) => a + (t.amountCents || 0), 0);
+
+  return { manualIn, manualOut };
+}
+
+async function sumReceivablesPaid({ salonId, from, to }) {
+  // Marcenaria: entradas reais = parcelas pagas (paidAt)
+  const agg = await prisma.receivableInstallment.aggregate({
+    where: {
+      receivable: { salonId },
+      status: "PAGO",
+      paidAt: { gte: from, lt: to },
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function sumPayablesPaid({ salonId, from, to }) {
+  // Marcenaria: saídas reais = parcelas pagas (paidAt)
+  const agg = await prisma.payableInstallment.aggregate({
+    where: {
+      payable: { salonId },
+      status: "PAGO",
+      paidAt: { gte: from, lt: to },
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function sumCosts({ salonId, from, to }) {
+  // Custos (fixo/variável): saída por occurredAt
+  const agg = await prisma.cost.aggregate({
+    where: { salonId, occurredAt: { gte: from, lt: to } },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function calcCashflow({ salonId, from, to }) {
+  // Entradas
+  const legacyAutoIn = await sumLegacyAutoInAppointments({ salonId, from, to });
+  const receivablesIn = await sumReceivablesPaid({ salonId, from, to });
+  const { manualIn, manualOut } = await sumManualTx({ salonId, from, to });
+
+  const inCents = legacyAutoIn + receivablesIn + manualIn;
+
+  // Saídas
+  const payablesOut = await sumPayablesPaid({ salonId, from, to });
+  const costsOut = await sumCosts({ salonId, from, to });
+
+  const outCents = manualOut + payablesOut + costsOut;
+
+  return {
+    inCents,
+    outCents,
+    balanceCents: inCents - outCents,
+    breakdown: {
+      legacyAutoInCents: legacyAutoIn,
+      receivablesInCents: receivablesIn,
+      manualInCents: manualIn,
+      manualOutCents: manualOut,
+      payablesOutCents: payablesOut,
+      costsOutCents: costsOut,
+    },
+  };
+}
+
+// ✅ NOVO: GET /api/finance/cashflow?from=ISO&to=ISO
+async function financeCashflow(req, res) {
+  const { salonId } = req.user;
+
+  const from = req.query.from ? parseISO(req.query.from) : null;
+  const to = req.query.to ? parseISO(req.query.to) : null;
+
+  if (!from || !to) return res.status(400).json({ message: "Informe from e to em ISO." });
+  if (from >= to) return res.status(400).json({ message: "Intervalo inválido: from precisa ser menor que to." });
+
+  // saldo anterior = fluxo do “início dos tempos” até 'from'
+  // (boa prática: usa 1970)
+  const epoch = new Date(0);
+
+  const prev = await calcCashflow({ salonId, from: epoch, to: from });
+  const cur = await calcCashflow({ salonId, from, to });
+
+  const previousBalanceCents = prev.balanceCents;
+  const currentBalanceCents = previousBalanceCents + cur.balanceCents;
+
+  return res.json({
+    previousBalanceCents,
+    period: {
+      from,
+      to,
+      inCents: cur.inCents,
+      outCents: cur.outCents,
+      netCents: cur.balanceCents,
+      breakdown: cur.breakdown,
+    },
+    currentBalanceCents,
+  });
+}
+
+// ✅ NOVO: GET /api/finance/receivables/month?month=YYYY-MM
+async function receivablesByMonth(req, res) {
+  const { salonId } = req.user;
+  const month = String(req.query.month || "").trim();
+  const range = monthRange(month);
+  if (!range) return res.status(400).json({ message: "month inválido. Use YYYY-MM" });
+
+  const rows = await prisma.receivableInstallment.findMany({
+    where: {
+      receivable: { salonId },
+      dueDate: { gte: range.from, lt: range.to },
+    },
+    orderBy: [{ dueDate: "asc" }, { number: "asc" }],
+    select: {
+      id: true,
+      number: true,
+      dueDate: true,
+      amountCents: true,
+      status: true,
+      paidAt: true,
+      method: true,
+      receivable: {
+        select: {
+          id: true,
+          order: {
+            select: {
+              id: true,
+              status: true,
+              client: { select: { id: true, name: true, phone: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const totalExpectedCents = rows.reduce((a, r) => a + (r.amountCents || 0), 0);
+  const totalReceivedCents = rows
+    .filter((r) => r.status === "PAGO")
+    .reduce((a, r) => a + (r.amountCents || 0), 0);
+
+  return res.json({
+    month,
+    totals: {
+      expectedCents: totalExpectedCents,
+      receivedCents: totalReceivedCents,
+      openCents: Math.max(0, totalExpectedCents - totalReceivedCents),
+    },
+    installments: rows.map((r) => ({
+      id: r.id,
+      number: r.number,
+      dueDate: r.dueDate,
+      amountCents: r.amountCents,
+      status: r.status,
+      paidAt: r.paidAt,
+      method: r.method,
+      orderId: r.receivable?.order?.id || null,
+      orderStatus: r.receivable?.order?.status || null,
+      client: r.receivable?.order?.client || null,
+    })),
+  });
+}
+
+// ✅ NOVO: GET /api/finance/payables/month?month=YYYY-MM
+async function payablesByMonth(req, res) {
+  const { salonId } = req.user;
+  const month = String(req.query.month || "").trim();
+  const range = monthRange(month);
+  if (!range) return res.status(400).json({ message: "month inválido. Use YYYY-MM" });
+
+  const rows = await prisma.payableInstallment.findMany({
+    where: {
+      payable: { salonId },
+      dueDate: { gte: range.from, lt: range.to },
+    },
+    orderBy: [{ dueDate: "asc" }, { number: "asc" }],
+    select: {
+      id: true,
+      number: true,
+      dueDate: true,
+      amountCents: true,
+      status: true,
+      paidAt: true,
+      method: true,
+      payable: {
+        select: {
+          id: true,
+          description: true,
+          supplier: { select: { id: true, name: true, phone: true } },
+        },
+      },
+    },
+  });
+
+  const totalExpectedCents = rows.reduce((a, r) => a + (r.amountCents || 0), 0);
+  const totalPaidCents = rows
+    .filter((r) => r.status === "PAGO")
+    .reduce((a, r) => a + (r.amountCents || 0), 0);
+
+  return res.json({
+    month,
+    totals: {
+      expectedCents: totalExpectedCents,
+      paidCents: totalPaidCents,
+      openCents: Math.max(0, totalExpectedCents - totalPaidCents),
+    },
+    installments: rows.map((r) => ({
+      id: r.id,
+      number: r.number,
+      dueDate: r.dueDate,
+      amountCents: r.amountCents,
+      status: r.status,
+      paidAt: r.paidAt,
+      method: r.method,
+      payableId: r.payable?.id || null,
+      description: r.payable?.description || null,
+      supplier: r.payable?.supplier || null,
+    })),
+  });
+}
+
+
 // --------------------
 // 3) CATEGORIES
 // --------------------
@@ -348,6 +598,12 @@ async function deleteTransaction(req, res) {
 module.exports = {
   financeSummary,
   financeFlow,
+
+  // ✅ novos
+  financeCashflow,
+  receivablesByMonth,
+  payablesByMonth,
+
   listCategories,
   createCategory,
   listTransactions,
@@ -355,3 +611,4 @@ module.exports = {
   updateTransaction,
   deleteTransaction,
 };
+
