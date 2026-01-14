@@ -11,6 +11,10 @@ const settingsRoutes = require("./routes/settings.routes");
 const adminRoutes = require("./routes/admin.routes");
 const meRoutes = require("./routes/me.routes");
 const ordersRoutes = require("./routes/orders.routes");
+const receivablesRoutes = require("./routes/receivables.routes");
+const payablesRoutes = require("./routes/payables.routes");
+const costsRoutes = require("./routes/costs.routes");
+
 
 
 const app = express();
@@ -28,7 +32,9 @@ app.use("/api/settings", settingsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/orders", ordersRoutes);
-
+app.use("/api/receivables", receivablesRoutes);
+app.use("/api/payables", payablesRoutes);
+app.use("/api/costs", costsRoutes);
 
 
 

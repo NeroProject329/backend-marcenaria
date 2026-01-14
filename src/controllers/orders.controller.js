@@ -29,126 +29,70 @@ function normalizeStatus(v) {
   return allowed.has(s) ? s : null;
 }
 
+const VALID_PAYMENT_MODE = new Set(["AVISTA", "PARCELADO"]);
+const VALID_PAYMENT_METHOD = new Set([
+  "PIX",
+  "CARTAO",
+  "DINHEIRO",
+  "BOLETO",
+  "TRANSFERENCIA",
+  "OUTRO",
+]);
+
+function normalizePaymentMode(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  const m = String(v).trim().toUpperCase();
+  return VALID_PAYMENT_MODE.has(m) ? m : null;
+}
+
+function normalizePaymentMethod(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  const m = String(v).trim().toUpperCase();
+  return VALID_PAYMENT_METHOD.has(m) ? m : null;
+}
+
 function calcTotals(items, discountCents = 0) {
   const subtotal = items.reduce((sum, it) => sum + it.totalCents, 0);
   const total = Math.max(0, subtotal - (discountCents || 0));
   return { subtotalCents: subtotal, totalCents: total };
 }
 
-// GET /api/orders
-async function listOrders(req, res) {
-  const { salonId } = req.user;
+function addMonths(date, months) {
+  const d = new Date(date);
+  const day = d.getDate();
+  d.setMonth(d.getMonth() + months);
 
-  const q = (req.query.q || "").trim();
-  const status = normalizeStatus(req.query.status);
-  if (req.query.status && status === null) {
-    return res.status(400).json({ message: "Status inválido." });
-  }
-
-  const where = { salonId };
-  if (status) where.status = status;
-
-  if (q) {
-    where.OR = [
-      { client: { name: { contains: q, mode: "insensitive" } } },
-      { client: { phone: { contains: q.replace(/\D/g, "") } } },
-      { notes: { contains: q, mode: "insensitive" } },
-    ];
-  }
-
-  const orders = await prisma.order.findMany({
-    where,
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      status: true,
-      createdAt: true,
-      expectedDeliveryAt: true,
-      deliveredAt: true,
-      subtotalCents: true,
-      discountCents: true,
-      totalCents: true,
-      notes: true,
-      client: { select: { id: true, name: true, phone: true, type: true } },
-      items: {
-        select: {
-          id: true,
-          name: true,
-          description: true,
-          quantity: true,
-          unitPriceCents: true,
-          totalCents: true,
-        },
-      },
-    },
-  });
-
-  return res.json({ orders });
+  // Ajuste simples pra evitar "pular" quando o mês não tem o mesmo dia
+  // Ex: 31 -> fevereiro
+  while (d.getDate() < day) d.setDate(d.getDate() - 1);
+  return d;
 }
 
-// GET /api/orders/:id
-async function getOrder(req, res) {
-  const { salonId } = req.user;
-  const { id } = req.params;
+// Divide total em N parcelas, garantindo soma exata (última recebe o resto)
+function splitIntoInstallments(totalCents, count) {
+  const base = Math.floor(totalCents / count);
+  const remainder = totalCents - base * count;
 
-  const order = await prisma.order.findFirst({
-    where: { id, salonId },
-    select: {
-      id: true,
-      status: true,
-      createdAt: true,
-      updatedAt: true,
-      expectedDeliveryAt: true,
-      deliveredAt: true,
-      subtotalCents: true,
-      discountCents: true,
-      totalCents: true,
-      notes: true,
-      client: { select: { id: true, name: true, phone: true, instagram: true, notes: true, type: true } },
-      items: {
-        select: {
-          id: true,
-          name: true,
-          description: true,
-          quantity: true,
-          unitPriceCents: true,
-          totalCents: true,
-        },
-      },
-      deliveries: {
-        orderBy: { createdAt: "desc" },
-        select: {
-          id: true,
-          status: true,
-          expectedAt: true,
-          deliveredAt: true,
-          address: true,
-          notes: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      },
-      receivables: {
-        orderBy: { createdAt: "desc" },
-        select: {
-          id: true,
-          totalCents: true,
-          method: true,
-          createdAt: true,
-          installments: {
-            orderBy: { number: "asc" },
-            select: { id: true, number: true, dueDate: true, amountCents: true, status: true, paidAt: true, method: true },
-          },
-        },
-      },
-    },
-  });
-
-  if (!order) return res.status(404).json({ message: "Pedido não encontrado." });
-  return res.json({ order });
+  const arr = Array.from({ length: count }, () => base);
+  arr[count - 1] = base + remainder;
+  return arr;
 }
 
-// POST /api/orders
+/**
+ * ✅ CREATE ORDER + AUTO RECEIVABLES
+ * POST /api/orders
+ * body:
+ *  - clientId (obrigatório)
+ *  - items (obrigatório)
+ *  - discountCents?
+ *  - expectedDeliveryAt?
+ *  - status?
+ *  - notes?
+ *  - paymentMode?: "AVISTA" | "PARCELADO"
+ *  - paymentMethod?: "PIX" | ...
+ *  - installmentsCount?: number (se PARCELADO)
+ *  - firstDueDate?: ISO date (se não vier: usa expectedDeliveryAt ou hoje)
+ */
 async function createOrder(req, res) {
   const { salonId } = req.user;
 
@@ -159,6 +103,12 @@ async function createOrder(req, res) {
     notes,
     discountCents,
     items,
+
+    // 🔥 novos campos
+    paymentMode,
+    paymentMethod,
+    installmentsCount,
+    firstDueDate,
   } = req.body;
 
   if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
@@ -177,7 +127,9 @@ async function createOrder(req, res) {
     return res.status(400).json({ message: "expectedDeliveryAt inválido (use ISO date)." });
   }
 
-  const disc = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
+  const disc = discountCents !== undefined
+    ? toInt(discountCents, "discountCents")
+    : { ok: true, value: 0 };
   if (!disc.ok) return res.status(400).json({ message: disc.message });
   if (disc.value < 0) return res.status(400).json({ message: "discountCents inválido." });
 
@@ -213,187 +165,102 @@ async function createOrder(req, res) {
 
   const totals = calcTotals(itemsNorm, disc.value);
 
-  const created = await prisma.order.create({
-    data: {
-      salonId,
-      clientId,
-      status: statusNorm || "ORCAMENTO",
-      expectedDeliveryAt: exp,
-      notes: notes ? String(notes).trim() : null,
-      discountCents: disc.value,
-      subtotalCents: totals.subtotalCents,
-      totalCents: totals.totalCents,
-      items: { create: itemsNorm },
-    },
-    select: {
-      id: true,
-      status: true,
-      createdAt: true,
-      expectedDeliveryAt: true,
-      subtotalCents: true,
-      discountCents: true,
-      totalCents: true,
-      client: { select: { id: true, name: true, phone: true, type: true } },
-      items: { select: { id: true, name: true, quantity: true, unitPriceCents: true, totalCents: true } },
-    },
-  });
-
-  return res.status(201).json({ order: created });
-}
-
-// PATCH /api/orders/:id
-async function updateOrder(req, res) {
-  const { salonId } = req.user;
-  const { id } = req.params;
-
-  const exists = await prisma.order.findFirst({
-    where: { id, salonId },
-    select: { id: true },
-  });
-  if (!exists) return res.status(404).json({ message: "Pedido não encontrado." });
-
-  const { status, expectedDeliveryAt, deliveredAt, notes, discountCents, items } = req.body;
-
-  const data = {};
-
-  if (status !== undefined) {
-    const s = normalizeStatus(status);
-    if (s === null) return res.status(400).json({ message: "Status inválido." });
-    data.status = s;
-
-    // se marcou ENTREGUE, opcionalmente carimba deliveredAt (se não mandou)
-    if (s === "ENTREGUE" && deliveredAt === undefined) data.deliveredAt = new Date();
+  // ✅ novos campos: validação de pagamento
+  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
+  if (paymentMode !== undefined && modeNorm === null) {
+    return res.status(400).json({ message: 'paymentMode inválido (AVISTA ou PARCELADO).' });
   }
 
-  if (expectedDeliveryAt !== undefined) {
-    const d = toDateOrNull(expectedDeliveryAt);
-    if (expectedDeliveryAt && !d) return res.status(400).json({ message: "expectedDeliveryAt inválido." });
-    data.expectedDeliveryAt = d;
+  const methodNorm = normalizePaymentMethod(paymentMethod);
+  if (paymentMethod !== undefined && methodNorm === null) {
+    return res.status(400).json({ message: "paymentMethod inválido." });
   }
 
-  if (deliveredAt !== undefined) {
-    const d = toDateOrNull(deliveredAt);
-    if (deliveredAt && !d) return res.status(400).json({ message: "deliveredAt inválido." });
-    data.deliveredAt = d;
-  }
-
-  if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
-
-  let itemsNorm = null;
-  let discVal = null;
-
-  if (discountCents !== undefined) {
-    const disc = toInt(discountCents, "discountCents");
-    if (!disc.ok) return res.status(400).json({ message: disc.message });
-    if (disc.value < 0) return res.status(400).json({ message: "discountCents inválido." });
-    discVal = disc.value;
-    data.discountCents = discVal;
-  }
-
-  // Se mandar items, substitui TODOS (simples e seguro pro MVP)
-  if (items !== undefined) {
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
+  let count = 1;
+  if (modeNorm === "PARCELADO") {
+    const c = toInt(installmentsCount, "installmentsCount");
+    if (!c.ok) return res.status(400).json({ message: c.message });
+    if (c.value < 2 || c.value > 24) {
+      return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
     }
-
-    itemsNorm = [];
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i] || {};
-      const name = String(it.name || "").trim();
-      if (name.length < 2) return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
-
-      const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
-      if (!q.ok) return res.status(400).json({ message: q.message });
-      if (q.value <= 0) return res.status(400).json({ message: `Item ${i + 1}: quantity inválido.` });
-
-      const up = toInt(it.unitPriceCents ?? 0, `items[${i}].unitPriceCents`);
-      if (!up.ok) return res.status(400).json({ message: up.message });
-      if (up.value < 0) return res.status(400).json({ message: `Item ${i + 1}: unitPriceCents inválido.` });
-
-      const totalCents = q.value * up.value;
-
-      itemsNorm.push({
-        name,
-        description: it.description ? String(it.description).trim() : null,
-        quantity: q.value,
-        unitPriceCents: up.value,
-        totalCents,
-      });
-    }
+    count = c.value;
   }
 
-  // Recalcular totais se mexeu em itens ou desconto
-  if (itemsNorm || discVal !== null) {
-    const current = await prisma.order.findFirst({
-      where: { id, salonId },
-      select: { discountCents: true, items: { select: { totalCents: true } } },
-    });
+  // base da 1ª parcela:
+  // prioridade: firstDueDate -> expectedDeliveryAt -> hoje
+  const baseDue =
+    toDateOrNull(firstDueDate) ||
+    exp ||
+    new Date();
 
-    const discountFinal = discVal !== null ? discVal : (current?.discountCents || 0);
-    const subtotalFinal = itemsNorm
-      ? itemsNorm.reduce((s, it) => s + it.totalCents, 0)
-      : (current?.items || []).reduce((s, it) => s + it.totalCents, 0);
-
-    data.subtotalCents = subtotalFinal;
-    data.totalCents = Math.max(0, subtotalFinal - discountFinal);
+  if (firstDueDate && !toDateOrNull(firstDueDate)) {
+    return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
   }
 
-  const updated = await prisma.$transaction(async (tx) => {
-    // se vai substituir itens
-    if (itemsNorm) {
-      await tx.orderItem.deleteMany({ where: { orderId: id } });
-      await tx.orderItem.createMany({
-        data: itemsNorm.map((it) => ({ ...it, orderId: id })),
-      });
-    }
+  // gera parcelas automaticamente
+  const amounts = splitIntoInstallments(totals.totalCents, count);
+  const installmentsData = amounts.map((amt, idx) => ({
+    number: idx + 1,
+    dueDate: addMonths(baseDue, idx),
+    amountCents: amt,
+    status: "PENDENTE",             // ✅ padrão (mais seguro)
+    method: methodNorm || null,
+  }));
 
-    return tx.order.update({
-      where: { id },
-      data,
+  // cria Order + Receivable numa transaction
+  const created = await prisma.$transaction(async (tx) => {
+    const order = await tx.order.create({
+      data: {
+        salonId,
+        clientId,
+        status: statusNorm || "ORCAMENTO",
+        expectedDeliveryAt: exp,
+        notes: notes ? String(notes).trim() : null,
+        discountCents: disc.value,
+        subtotalCents: totals.subtotalCents,
+        totalCents: totals.totalCents,
+        items: { create: itemsNorm },
+      },
       select: {
         id: true,
         status: true,
         createdAt: true,
-        updatedAt: true,
         expectedDeliveryAt: true,
-        deliveredAt: true,
         subtotalCents: true,
         discountCents: true,
         totalCents: true,
-        notes: true,
         client: { select: { id: true, name: true, phone: true, type: true } },
         items: { select: { id: true, name: true, quantity: true, unitPriceCents: true, totalCents: true } },
       },
     });
+
+    const receivable = await tx.receivable.create({
+      data: {
+        salonId,
+        orderId: order.id,
+        totalCents: totals.totalCents,
+        method: methodNorm || null,
+        installments: { create: installmentsData },
+      },
+      select: {
+        id: true,
+        totalCents: true,
+        method: true,
+        installments: {
+          orderBy: { number: "asc" },
+          select: { id: true, number: true, dueDate: true, amountCents: true, status: true, paidAt: true, method: true },
+        },
+      },
+    });
+
+    return { order, receivable };
   });
 
-  return res.json({ order: updated });
-}
-
-// POST /api/orders/:id/cancel  (melhor do que DELETE)
-async function cancelOrder(req, res) {
-  const { salonId } = req.user;
-  const { id } = req.params;
-
-  const exists = await prisma.order.findFirst({
-    where: { id, salonId },
-    select: { id: true },
-  });
-  if (!exists) return res.status(404).json({ message: "Pedido não encontrado." });
-
-  const order = await prisma.order.update({
-    where: { id },
-    data: { status: "CANCELADO" },
-    select: { id: true, status: true },
-  });
-
-  return res.json({ order });
+  return res.status(201).json(created);
 }
 
 module.exports = {
-  listOrders,
-  getOrder,
+  // ... mantenha os outros exports que já existem no seu controller:
+  // listOrders, getOrder, updateOrder, cancelOrder,
   createOrder,
-  updateOrder,
-  cancelOrder,
 };
