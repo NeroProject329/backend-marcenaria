@@ -96,6 +96,7 @@ async function me(req, res) {
           plan: true,
           planStatus: true,
           planEndsAt: true,
+          trialEndsAt: true,
         },
       },
     },
