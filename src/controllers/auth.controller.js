@@ -29,7 +29,6 @@ async function register(req, res) {
         salon: {
           create: {
             name: salonName,
-            phone: phone || null
           }
         }
       },
