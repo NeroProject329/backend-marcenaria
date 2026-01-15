@@ -4,15 +4,17 @@ const {
   listServices,
   createService,
   updateService,
-  disableService,
+  toggleService,
 } = require("../controllers/services.controller");
-const { checkLimit } = require("../middlewares/plan.middleware"); // ✅ ADICIONA ISSO
+const { checkLimit } = require("../middlewares/plan.middleware");
 
 router.use(requireAuth);
 
 router.get("/", listServices);
-router.post("/", requireAuth, checkLimit("services"), createService);
+router.post("/", checkLimit("services"), createService);
 router.patch("/:id", updateService);
-router.delete("/:id", disableService);
+
+// DELETE = desativar (soft delete)
+router.delete("/:id", toggleService);
 
 module.exports = router;
