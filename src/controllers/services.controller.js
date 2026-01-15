@@ -193,9 +193,40 @@ async function toggleService(req, res) {
   }
 }
 
+/**
+ * DELETAR SERVIÇO
+ * DELETE /api/services/:id
+ */
+async function deleteService(req, res) {
+  try {
+    const salonId = req.user.salonId;
+    const { id } = req.params;
+
+    // delete seguro por tenant
+    const deleted = await prisma.service.deleteMany({
+      where: { id, salonId },
+    });
+
+    if (!deleted.count) {
+      return res.status(404).json({ message: "Serviço não encontrado." });
+    }
+
+    return res.status(204).send();
+  } catch (err) {
+    // Se tiver FK (ex: appointments referenciando service), Prisma pode jogar erro.
+    console.error("[deleteService]", err);
+    return res.status(409).json({
+      message: "Não foi possível deletar: serviço está em uso. Desative em vez de excluir.",
+    });
+  }
+}
+
+
 module.exports = {
   listServices,
   createService,
   updateService,
   toggleService,
+  deleteService,
 };
+
