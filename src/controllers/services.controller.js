@@ -1,168 +1,201 @@
 const { prisma } = require("../lib/prisma");
 
-// Helpers
-function toInt(value, fieldName) {
+/**
+ * Helpers
+ */
+function toInt(value, field) {
   const n = Number(value);
-  if (!Number.isFinite(n) || !Number.isInteger(n)) {
-    const err = new Error(`Campo inválido: ${fieldName}`);
-    err.statusCode = 400;
-    throw err;
+  if (!Number.isInteger(n)) {
+    throw new Error(`${field} inválido`);
   }
   return n;
 }
 
+/**
+ * LISTAR SERVIÇOS
+ * GET /api/services
+ */
 async function listServices(req, res) {
-  const { salonId } = req.user;
-  const { active } = req.query; // ?active=true/false
+  try {
+    const salonId = req.user.salonId;
 
-  const where = { salonId };
-  if (active === "true") where.isActive = true;
-  if (active === "false") where.isActive = false;
+    const services = await prisma.service.findMany({
+      where: { salonId },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        price: true,
+        duration: true, // campo real do Prisma
+        isActive: true,
+        createdAt: true,
+      },
+    });
 
-  const services = await prisma.service.findMany({
-    where,
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      name: true,
-      category: true,
-      price: true,
-      durationM: true,
-      isActive: true,
-      createdAt: true,
-    },
-  });
-
-  return res.json({ services });
+    // mantém compatibilidade com o front (durationM)
+    return res.json({
+      services: services.map((s) => ({
+        ...s,
+        durationM: s.duration,
+      })),
+    });
+  } catch (err) {
+    console.error("[listServices]", err);
+    return res.status(500).json({ message: "Erro ao listar serviços." });
+  }
 }
 
+/**
+ * CRIAR SERVIÇO
+ * POST /api/services
+ */
 async function createService(req, res) {
   try {
-    const { salonId } = req.user;
+    const salonId = req.user.salonId;
     const { name, category, price, durationM } = req.body;
 
-    if (!name || typeof name !== "string" || name.trim().length < 2) {
-      return res.status(400).json({ message: "Nome do serviço é obrigatório." });
+    if (!name || price == null || durationM == null) {
+      return res.status(400).json({ message: "Campos obrigatórios ausentes." });
     }
 
-    const priceInt = toInt(price, "price"); // centavos
-    const durationInt = toInt(durationM, "durationM"); // minutos
+    const priceInt = toInt(price, "price");
+    const durationInt = toInt(durationM, "durationM");
 
-    if (priceInt < 0) return res.status(400).json({ message: "Preço inválido." });
-    if (durationInt <= 0) return res.status(400).json({ message: "Duração inválida." });
+    if (priceInt < 0 || durationInt <= 0) {
+      return res.status(400).json({ message: "Valores inválidos." });
+    }
 
     const service = await prisma.service.create({
       data: {
-        name: name.trim(),
+        salonId,
+        name: String(name).trim(),
         category: category ? String(category).trim() : null,
         price: priceInt,
-        durationM: durationInt,
-        salonId,
+        duration: durationInt, // grava no campo real
       },
       select: {
         id: true,
         name: true,
         category: true,
         price: true,
-        durationM: true,
+        duration: true,
         isActive: true,
         createdAt: true,
       },
     });
 
-    return res.status(201).json({ service });
-  } catch (e) {
-    const status = e.statusCode || 500;
-    return res.status(status).json({ message: e.message || "Erro interno" });
+    return res.status(201).json({
+      service: {
+        ...service,
+        durationM: service.duration,
+      },
+    });
+  } catch (err) {
+    console.error("[createService]", err);
+    return res.status(500).json({ message: "Erro ao criar serviço." });
   }
 }
 
+/**
+ * ATUALIZAR SERVIÇO
+ * PATCH /api/services/:id
+ */
 async function updateService(req, res) {
   try {
-    const { salonId } = req.user;
+    const salonId = req.user.salonId;
     const { id } = req.params;
-
-    const exists = await prisma.service.findFirst({
-      where: { id, salonId },
-      select: { id: true },
-    });
-
-    if (!exists) return res.status(404).json({ message: "Serviço não encontrado." });
-
     const { name, category, price, durationM, isActive } = req.body;
 
     const data = {};
 
-    if (name !== undefined) {
-      if (!name || String(name).trim().length < 2) {
-        return res.status(400).json({ message: "Nome inválido." });
-      }
-      data.name = String(name).trim();
-    }
+    if (name !== undefined) data.name = String(name).trim();
+    if (category !== undefined) data.category = category ? String(category).trim() : null;
+    if (price !== undefined) data.price = toInt(price, "price");
+    if (durationM !== undefined) data.duration = toInt(durationM, "durationM");
+    if (isActive !== undefined) data.isActive = Boolean(isActive);
 
-    if (category !== undefined) {
-      data.category = category ? String(category).trim() : null;
-    }
-
-    if (price !== undefined) {
-      const priceInt = toInt(price, "price");
-      if (priceInt < 0) return res.status(400).json({ message: "Preço inválido." });
-      data.price = priceInt;
-    }
-
-    if (durationM !== undefined) {
-      const durationInt = toInt(durationM, "durationM");
-      if (durationInt <= 0) return res.status(400).json({ message: "Duração inválida." });
-      data.durationM = durationInt;
-    }
-
-    if (isActive !== undefined) {
-      data.isActive = Boolean(isActive);
-    }
-
-    const service = await prisma.service.update({
-      where: { id },
+    const updatedCount = await prisma.service.updateMany({
+      where: { id, salonId },
       data,
+    });
+
+    if (!updatedCount.count) {
+      return res.status(404).json({ message: "Serviço não encontrado." });
+    }
+
+    const updated = await prisma.service.findUnique({
+      where: { id },
       select: {
         id: true,
         name: true,
         category: true,
         price: true,
-        durationM: true,
+        duration: true,
         isActive: true,
         createdAt: true,
       },
     });
 
-    return res.json({ service });
-  } catch (e) {
-    const status = e.statusCode || 500;
-    return res.status(status).json({ message: e.message || "Erro interno" });
+    return res.json({
+      service: {
+        ...updated,
+        durationM: updated.duration,
+      },
+    });
+  } catch (err) {
+    console.error("[updateService]", err);
+    return res.status(500).json({ message: "Erro ao atualizar serviço." });
   }
 }
 
-async function disableService(req, res) {
-  const { salonId } = req.user;
-  const { id } = req.params;
+/**
+ * ATIVAR / DESATIVAR SERVIÇO
+ * PATCH /api/services/:id/toggle
+ */
+async function toggleService(req, res) {
+  try {
+    const salonId = req.user.salonId;
+    const { id } = req.params;
 
-  const exists = await prisma.service.findFirst({
-    where: { id, salonId },
-    select: { id: true },
-  });
+    const service = await prisma.service.findFirst({
+      where: { id, salonId },
+      select: { isActive: true },
+    });
 
-  if (!exists) return res.status(404).json({ message: "Serviço não encontrado." });
+    if (!service) {
+      return res.status(404).json({ message: "Serviço não encontrado." });
+    }
 
-  await prisma.service.update({
-    where: { id },
-    data: { isActive: false },
-  });
+    const updated = await prisma.service.update({
+      where: { id },
+      data: { isActive: !service.isActive },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        price: true,
+        duration: true,
+        isActive: true,
+        createdAt: true,
+      },
+    });
 
-  return res.json({ ok: true });
+    return res.json({
+      service: {
+        ...updated,
+        durationM: updated.duration,
+      },
+    });
+  } catch (err) {
+    console.error("[toggleService]", err);
+    return res.status(500).json({ message: "Erro ao alterar status do serviço." });
+  }
 }
 
 module.exports = {
   listServices,
   createService,
   updateService,
-  disableService,
+  toggleService,
 };

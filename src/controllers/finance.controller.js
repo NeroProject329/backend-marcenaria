@@ -444,19 +444,29 @@ async function listTransactions(req, res) {
     where,
     orderBy: { occurredAt: "desc" },
     select: {
-      id: true,
-      type: true,
-      source: true,
-      name: true,
-      occurredAt: true,
-      amountCents: true,
-      notes: true,
-      category: { select: { id: true, name: true } },
-      createdAt: true,
-    },
+  id: true,
+  type: true,
+  source: true,
+  description: true,
+  occurredAt: true,
+  amount: true,
+  category: {
+    select: { id: true, name: true }
+  },
+  createdAt: true,
+}
+,
   });
 
-  return res.json({ transactions });
+  const parsed = transactions.map(t => ({
+  ...t,
+  name: t.description,
+  amountCents: t.amount,
+  notes: null,
+}));
+
+
+  return res.json({ transactions: parsed });
 }
 
 // POST /api/finance/transactions
@@ -486,15 +496,14 @@ async function createTransaction(req, res) {
 
   const transaction = await prisma.cashTransaction.create({
     data: {
-      salonId,
-      type: t,
-      source: "MANUAL",
-      name: String(name).trim(),
-      occurredAt: dt,
-      amountCents: cents,
-      categoryId: categoryId || null,
-      notes: notes ? String(notes).trim() : null,
-    },
+  salonId,
+  type,
+  source: "MANUAL",
+  description: name,
+  amount: amountCents,
+  occurredAt,
+  categoryId,
+},
     select: {
       id: true,
       type: true,
