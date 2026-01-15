@@ -81,6 +81,8 @@ model Salon {
   plan       String    @default("FREE")
   planStatus String    @default("ACTIVE")
   planEndsAt DateTime?
+  trialEndsAt DateTime?
+
 
   services         Service[]
   clients          Client[]
