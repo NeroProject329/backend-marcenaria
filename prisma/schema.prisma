@@ -78,11 +78,10 @@ model Salon {
   userId String @unique
   user   User   @relation(fields: [userId], references: [id])
 
-  plan       String    @default("FREE")
-  planStatus String    @default("ACTIVE")
-  planEndsAt DateTime?
+  plan        String    @default("FREE")
+  planStatus  String    @default("ACTIVE")
+  planEndsAt  DateTime?
   trialEndsAt DateTime?
-
 
   services         Service[]
   clients          Client[]
@@ -183,23 +182,22 @@ model CashCategory {
 }
 
 model CashTransaction {
-  id          String   @id @default(cuid())
-  salonId     String
+  id     String     @id @default(cuid())
+  type   CashType
+  source CashSource @default(MANUAL)
 
-  type        String   // IN | OUT
-  source      String   // MANUAL | AUTO
-
-  name        String
-  notes       String?
-
-  amountCents Int
-
+  amount      Int // em centavos
   occurredAt  DateTime
-  categoryId  String?
+  description String?
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  category    CashCategory? @relation(fields: [categoryId], references: [id])
+  salonId String
+  salon   Salon  @relation(fields: [salonId], references: [id])
+
+  categoryId String?
+  category   CashCategory? @relation(fields: [categoryId], references: [id])
 
   // integração com agenda (opcional, mas recomendado)
   appointmentId String?      @unique
