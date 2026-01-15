@@ -96,11 +96,12 @@ async function calcFlow({ salonId, from, to }) {
   // Lançamentos manuais
   const tx = await prisma.cashTransaction.findMany({
     where: { salonId, occurredAt: { gte: from, lt: to }, source: "MANUAL" },
-    select: { type: true, amountCents: true },
+    select: { type: true, amount: true },
   });
 
-  const manualIn = tx.filter((t) => t.type === "IN").reduce((a, t) => a + (t.amountCents || 0), 0);
-  const manualOut = tx.filter((t) => t.type === "OUT").reduce((a, t) => a + (t.amountCents || 0), 0);
+  const manualIn = tx.filter((t) => t.type === "IN").reduce((a, t) => a + (t.amount || 0), 0);
+  const manualOut = tx.filter((t) => t.type === "OUT").reduce((a, t) => a + (t.amount || 0), 0);
+
 
   const inCents = autoIn + manualIn;
   const outCents = manualOut;
@@ -144,11 +145,12 @@ async function sumLegacyAutoInAppointments({ salonId, from, to }) {
 async function sumManualTx({ salonId, from, to }) {
   const tx = await prisma.cashTransaction.findMany({
     where: { salonId, occurredAt: { gte: from, lt: to }, source: "MANUAL" },
-    select: { type: true, amountCents: true },
+    select: { type: true, amount: true },
   });
 
-  const manualIn = tx.filter((t) => t.type === "IN").reduce((a, t) => a + (t.amountCents || 0), 0);
-  const manualOut = tx.filter((t) => t.type === "OUT").reduce((a, t) => a + (t.amountCents || 0), 0);
+  const manualIn = tx.filter((t) => t.type === "IN").reduce((a, t) => a + (t.amount || 0), 0);
+  const manualOut = tx.filter((t) => t.type === "OUT").reduce((a, t) => a + (t.amount || 0), 0);
+
 
   return { manualIn, manualOut };
 }
@@ -497,27 +499,35 @@ async function createTransaction(req, res) {
   const transaction = await prisma.cashTransaction.create({
     data: {
   salonId,
-  type,
+  type: t,
   source: "MANUAL",
-  description: name,
-  amount: amountCents,
-  occurredAt,
-  categoryId,
+  description: String(name).trim(),
+  amount: cents,
+  occurredAt: dt,
+  categoryId: categoryId || null,
 },
-    select: {
-      id: true,
-      type: true,
-      source: true,
-      name: true,
-      occurredAt: true,
-      amountCents: true,
-      notes: true,
-      category: { select: { id: true, name: true } },
-      createdAt: true,
-    },
+   select: {
+  id: true,
+  type: true,
+  source: true,
+  description: true,
+  occurredAt: true,
+  amount: true,
+  category: { select: { id: true, name: true } },
+  createdAt: true,
+},
   });
 
-  return res.status(201).json({ transaction });
+  return res.status(201).json({
+  transaction: {
+    ...transaction,
+    name: transaction.description,
+    amountCents: transaction.amount,
+    notes: null,
+  },
+});
+
+
 }
 
 // PATCH /api/finance/transactions/:id
@@ -537,7 +547,8 @@ async function updateTransaction(req, res) {
 
   if (name !== undefined) {
     if (!name || String(name).trim().length < 2) return res.status(400).json({ message: "Nome inválido." });
-    data.name = String(name).trim();
+    data.description = String(name).trim();
+
   }
 
   if (occurredAt !== undefined) {
@@ -551,10 +562,10 @@ async function updateTransaction(req, res) {
     if (!Number.isFinite(cents) || !Number.isInteger(cents) || cents <= 0) {
       return res.status(400).json({ message: "amountCents inválido (inteiro > 0)." });
     }
-    data.amountCents = cents;
+    data.amount = cents;
   }
 
-  if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
+  
 
   if (categoryId !== undefined) {
     if (!categoryId) {
@@ -573,20 +584,28 @@ async function updateTransaction(req, res) {
   const transaction = await prisma.cashTransaction.update({
     where: { id },
     data,
-    select: {
-      id: true,
-      type: true,
-      source: true,
-      name: true,
-      occurredAt: true,
-      amountCents: true,
-      notes: true,
-      category: { select: { id: true, name: true } },
-      createdAt: true,
-    },
+select: {
+  id: true,
+  type: true,
+  source: true,
+  description: true,
+  occurredAt: true,
+  amount: true,
+  category: { select: { id: true, name: true } },
+  createdAt: true,
+},
+
   });
 
-  return res.json({ transaction });
+  return res.json({
+  transaction: {
+    ...transaction,
+    name: transaction.description,
+    amountCents: transaction.amount,
+    notes: null,
+  },
+});
+
 }
 
 // DELETE /api/finance/transactions/:id
