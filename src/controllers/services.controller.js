@@ -33,13 +33,7 @@ async function listServices(req, res) {
       },
     });
 
-    // mantém compatibilidade com o front (durationM)
-    return res.json({
-      services: services.map((s) => ({
-        ...s,
-        durationM: s.duration,
-      })),
-    });
+    
   } catch (err) {
     console.error("[listServices]", err);
     return res.status(500).json({ message: "Erro ao listar serviços." });
@@ -85,12 +79,6 @@ async function createService(req, res) {
       },
     });
 
-    return res.status(201).json({
-      service: {
-        ...service,
-        durationM: service.duration,
-      },
-    });
   } catch (err) {
     console.error("[createService]", err);
     return res.status(500).json({ message: "Erro ao criar serviço." });
@@ -112,7 +100,6 @@ async function updateService(req, res) {
     if (name !== undefined) data.name = String(name).trim();
     if (category !== undefined) data.category = category ? String(category).trim() : null;
     if (price !== undefined) data.price = toInt(price, "price");
-    if (durationM !== undefined) data.duration = toInt(durationM, "durationM");
     if (isActive !== undefined) data.isActive = Boolean(isActive);
 
     const updatedCount = await prisma.service.updateMany({
@@ -137,12 +124,7 @@ async function updateService(req, res) {
       },
     });
 
-    return res.json({
-      service: {
-        ...updated,
-        durationM: updated.duration,
-      },
-    });
+
   } catch (err) {
     console.error("[updateService]", err);
     return res.status(500).json({ message: "Erro ao atualizar serviço." });
@@ -181,12 +163,6 @@ async function toggleService(req, res) {
       },
     });
 
-    return res.json({
-      service: {
-        ...updated,
-        durationM: updated.duration,
-      },
-    });
   } catch (err) {
     console.error("[toggleService]", err);
     return res.status(500).json({ message: "Erro ao alterar status do serviço." });

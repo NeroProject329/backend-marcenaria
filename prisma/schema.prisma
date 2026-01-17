@@ -75,6 +75,11 @@ model Salon {
   name      String
   createdAt DateTime @default(now())
 
+  openTime         String?   // "09:00"
+  closeTime        String?   // "18:00"
+  workingDays      Int[]     // [1,2,3,4,5]
+  blockOutsideHours Boolean  @default(false)
+
   userId String @unique
   user   User   @relation(fields: [userId], references: [id])
 
@@ -92,6 +97,7 @@ model Salon {
   receivables      Receivable[]
   payables         Payable[]
   costs            Cost[]
+  
 
   @@index([plan, planStatus])
 }
