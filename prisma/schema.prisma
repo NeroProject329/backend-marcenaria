@@ -73,6 +73,9 @@ model User {
 model Salon {
   id        String   @id @default(cuid())
   name      String
+  address   String?
+  phone     String?
+  logoUrl   String?
   createdAt DateTime @default(now())
 
   openTime         String?   // "09:00"
@@ -80,8 +83,8 @@ model Salon {
   workingDays      Int[]     // [1,2,3,4,5]
   blockOutsideHours Boolean  @default(false)
 
-  userId String @unique
-  user   User   @relation(fields: [userId], references: [id])
+  ownerId String @unique
+  owner   User   @relation(fields: [ownerId], references: [id])
 
   plan        String    @default("FREE")
   planStatus  String    @default("ACTIVE")
