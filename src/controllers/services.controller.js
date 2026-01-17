@@ -27,7 +27,7 @@ async function listServices(req, res) {
         name: true,
         category: true,
         price: true,
-        duration: true, // campo real do Prisma
+        durationM: true, // campo real do Prisma
         isActive: true,
         createdAt: true,
       },
@@ -72,14 +72,14 @@ async function createService(req, res) {
         name: String(name).trim(),
         category: category ? String(category).trim() : null,
         price: priceInt,
-        duration: durationInt, // grava no campo real
+        durationM: durationInt, // grava no campo real
       },
       select: {
         id: true,
         name: true,
         category: true,
         price: true,
-        duration: true,
+        durationM: true,
         isActive: true,
         createdAt: true,
       },
@@ -131,7 +131,7 @@ async function updateService(req, res) {
         name: true,
         category: true,
         price: true,
-        duration: true,
+        durationM: true,
         isActive: true,
         createdAt: true,
       },
@@ -175,7 +175,7 @@ async function toggleService(req, res) {
         name: true,
         category: true,
         price: true,
-        duration: true,
+        durationM: true,
         isActive: true,
         createdAt: true,
       },

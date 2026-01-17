@@ -101,7 +101,7 @@ model Service {
   name      String
   category  String?
   price     Int // em centavos (ex: R$ 49,90 = 4990)
-  duration  Int // em minutos
+  durationM Int // em minutos
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
 
