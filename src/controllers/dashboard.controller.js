@@ -77,7 +77,7 @@ async function overview(req, res) {
   const recWeek = await prisma.receivableInstallment.findMany({
   where: {
     receivable: { salonId },
-    dueDate: { gte: weekStart, lt: weekEnd },
+    dueDate: { gte: weekStart, lte: weekEnd },
   },
   select: { amountCents: true, dueDate: true },
 });
@@ -87,7 +87,7 @@ async function overview(req, res) {
   const payWeek = await prisma.payableInstallment.findMany({
   where: {
     payable: { salonId },
-    dueDate: { gte: weekStart, lt: weekEnd },
+    dueDate: { gte: weekStart, lte: weekEnd },
   },
   select: { amountCents: true, dueDate: true },
 });
@@ -104,11 +104,11 @@ async function overview(req, res) {
     const dayStart = new Date(day); dayStart.setHours(0,0,0,0);
     const dayEnd = new Date(day); dayEnd.setHours(23,59,59,999);
 
-    const rSum = recPaid
+    const rSum = recWeek
       .filter(x => x.dueDate >= dayStart && x.dueDate <= dayEnd)
       .reduce((a, x) => a + (x.amountCents || 0), 0);
 
-    const pSum = payPaid
+    const pSum = payWeek
       .filter(x => x.dueDate >= dayStart && x.dueDate <= dayEnd)
       .reduce((a, x) => a + (x.amountCents || 0), 0);
 
@@ -118,10 +118,10 @@ async function overview(req, res) {
 
   return res.json({
     meta: {
-      month: yyyyMm(now),
-      weekStart,
-      weekEnd,
-    },
+    month: yyyyMm(now),
+    weekStart: weekStart.toISOString(),
+    weekEnd: weekEnd.toISOString(),
+  },
     kpis: {
       clientsCount,
       ordersMonthCount,
