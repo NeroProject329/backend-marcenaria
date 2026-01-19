@@ -470,43 +470,49 @@ async function cancelOrder(req, res) {
   return res.json({ order });
 }
 
+
 // DELETE /api/orders/:id
 async function deleteOrder(req, res) {
   const { salonId } = req.user;
   const { id } = req.params;
 
-  const order = await prisma.order.findFirst({
+  const exists = await prisma.order.findFirst({
     where: { id, salonId },
     select: { id: true },
   });
-
-  if (!order) {
-    return res.status(404).json({ message: "Pedido não encontrado." });
-  }
+  if (!exists) return res.status(404).json({ message: "Pedido não encontrado." });
 
   await prisma.$transaction(async (tx) => {
-    // remove parcelas / recebíveis
-    await tx.installment.deleteMany({
-      where: { receivable: { orderId: id } },
-    });
-
-    await tx.receivable.deleteMany({
+    // 1) pega receivables do pedido
+    const recs = await tx.receivable.findMany({
       where: { orderId: id },
+      select: { id: true },
     });
+    const recIds = recs.map((r) => r.id);
 
-    // remove itens
-    await tx.orderItem.deleteMany({
-      where: { orderId: id },
-    });
+    // 2) deleta parcelas (MODEL CERTO: ReceivableInstallment)
+    if (recIds.length) {
+      await tx.receivableInstallment.deleteMany({
+        where: { receivableId: { in: recIds } },
+      });
+    }
 
-    // remove pedido
-    await tx.order.delete({
-      where: { id },
-    });
+    // 3) deleta recebíveis
+    await tx.receivable.deleteMany({ where: { orderId: id } });
+
+    // 4) deleta itens
+    await tx.orderItem.deleteMany({ where: { orderId: id } });
+
+    // 5) deleta entregas (se existir)
+    await tx.delivery.deleteMany({ where: { orderId: id } });
+
+    // 6) deleta o pedido
+    await tx.order.delete({ where: { id } });
   });
 
   return res.json({ ok: true });
 }
+
 
 
 module.exports = {
