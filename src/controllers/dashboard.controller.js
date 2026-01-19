@@ -34,14 +34,20 @@ async function overview(req, res) {
 
   // semana (para gráficos)
   const weekStart = parseISOorNull(req.query.weekStart) || startOfWeekLocal(now);
-  const weekEnd = addDays(weekStart, 7);
+  const weekEnd = addDays(weekStart, 6);
+  weekEnd.setHours(23, 59, 59, 999);
+
 
   // 1) clientes
   const clientsCount = await prisma.client.count({ where: { salonId } });
 
   // 2) vendas do mês (quantidade + total)
   const ordersMonth = await prisma.order.aggregate({
-    where: { salonId, createdAt: { gte: monthStart, lt: monthEnd } },
+    where: {
+  salonId,
+  createdAt: { gte: monthStart, lt: monthEnd },
+  status: { in: ["PEDIDO", "EM_PRODUCAO", "PRONTO", "ENTREGUE"] },
+},
     _count: { id: true },
     _sum: { totalCents: true },
   });
@@ -68,24 +74,24 @@ async function overview(req, res) {
   });
 
   // 4) recebimentos semana (parcelas pagas por dia)
-  const recPaid = await prisma.receivableInstallment.findMany({
-    where: {
-      receivable: { salonId },
-      status: "PAGO",
-      paidAt: { gte: weekStart, lt: weekEnd },
-    },
-    select: { amountCents: true, paidAt: true },
-  });
+  const recWeek = await prisma.receivableInstallment.findMany({
+  where: {
+    receivable: { salonId },
+    dueDate: { gte: weekStart, lt: weekEnd },
+  },
+  select: { amountCents: true, dueDate: true },
+});
+
 
   // 5) pagamentos semana (parcelas pagas por dia)
-  const payPaid = await prisma.payableInstallment.findMany({
-    where: {
-      payable: { salonId },
-      status: "PAGO",
-      paidAt: { gte: weekStart, lt: weekEnd },
-    },
-    select: { amountCents: true, paidAt: true },
-  });
+  const payWeek = await prisma.payableInstallment.findMany({
+  where: {
+    payable: { salonId },
+    dueDate: { gte: weekStart, lt: weekEnd },
+  },
+  select: { amountCents: true, dueDate: true },
+});
+
 
   // monta série diária (segunda..domingo)
   const labels = [];
@@ -99,11 +105,11 @@ async function overview(req, res) {
     const dayEnd = new Date(day); dayEnd.setHours(23,59,59,999);
 
     const rSum = recPaid
-      .filter(x => x.paidAt >= dayStart && x.paidAt <= dayEnd)
+      .filter(x => x.dueDate >= dayStart && x.dueDate <= dayEnd)
       .reduce((a, x) => a + (x.amountCents || 0), 0);
 
     const pSum = payPaid
-      .filter(x => x.paidAt >= dayStart && x.paidAt <= dayEnd)
+      .filter(x => x.dueDate >= dayStart && x.dueDate <= dayEnd)
       .reduce((a, x) => a + (x.amountCents || 0), 0);
 
     receivablesSeries.push(rSum);
