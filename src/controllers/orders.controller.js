@@ -39,6 +39,8 @@ const VALID_PAYMENT_METHOD = new Set([
   "OUTRO",
 ]);
 
+
+
 function normalizePaymentMode(v) {
   if (v === undefined || v === null || v === "") return undefined;
   const m = String(v).trim().toUpperCase();
@@ -78,6 +80,57 @@ function splitIntoInstallments(totalCents, count) {
   const arr = Array.from({ length: count }, () => base);
   arr[count - 1] = base + remainder;
   return arr;
+}
+
+function parseISODate(v) {
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function validateAndBuildCustomInstallments({ installments, totalCents, methodNorm }) {
+  if (!Array.isArray(installments) || installments.length < 2) {
+    return { ok: false, error: "installments precisa ter no mínimo 2 parcelas." };
+  }
+
+  const normalized = installments.map((p, idx) => {
+    const due = parseISODate(p?.dueDate);
+    const amountCents = Number(p?.amountCents);
+
+    if (!due) return { ok: false, error: `Parcela ${idx + 1}: dueDate inválido.` };
+    if (!Number.isFinite(amountCents) || amountCents <= 0)
+      return { ok: false, error: `Parcela ${idx + 1}: amountCents inválido.` };
+
+    return { ok: true, dueDate: due, amountCents };
+  });
+
+  const bad = normalized.find((x) => x.ok === false);
+  if (bad) return bad;
+
+  const list = normalized
+    .filter((x) => x.ok)
+    .map((x) => ({ dueDate: x.dueDate, amountCents: x.amountCents }))
+    .sort((a, b) => a.dueDate - b.dueDate);
+
+  const sum = list.reduce((acc, p) => acc + p.amountCents, 0);
+
+  // se quiser permitir diferença pequena por arredondamento, pode tolerar 1 centavo
+  if (sum !== totalCents) {
+    return { ok: false, error: `A soma das parcelas (${sum}) é diferente do total (${totalCents}).` };
+  }
+
+  const firstDueDate = list[0].dueDate;
+
+  const installmentsData = list.map((p, i) => ({
+    number: i + 1,
+    dueDate: p.dueDate,
+    amountCents: p.amountCents,
+    status: "PENDENTE",
+    paidAt: null,
+    method: methodNorm || null,
+
+  }));
+
+  return { ok: true, firstDueDate, installmentsData };
 }
 
 // ===== Controllers =====
@@ -236,6 +289,7 @@ async function createOrder(req, res) {
     installmentsCount,
     firstDueDate,
     paidNow,
+    installments,
   } = req.body;
 
   if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
@@ -290,6 +344,8 @@ async function createOrder(req, res) {
 
   const totals = calcTotals(itemsNorm, disc.value);
 
+
+  
   // pagamento
   const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
   if (paymentMode !== undefined && modeNorm === null) {
@@ -311,17 +367,43 @@ async function createOrder(req, res) {
     count = c.value;
   }
 
-  const parsedFirst = toDateOrNull(firstDueDate);
-  if (firstDueDate && !parsedFirst) {
-    return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+ const parsedFirst = toDateOrNull(firstDueDate);
+if (firstDueDate && !parsedFirst) {
+  return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+}
+
+// base (fallback) caso não venha lista custom
+const baseDue = parsedFirst || exp || new Date();
+
+const paidNowBool = modeNorm === "AVISTA" ? toBool(paidNow) : false;
+const now = new Date();
+
+let finalFirstDueDate = baseDue;         // ✅ vai virar a menor data quando custom
+let installmentsData = [];               // ✅ vai ser custom OU mensal
+
+// ✅ 1) Se for PARCELADO e vier installments[] -> usa CUSTOM
+if (modeNorm === "PARCELADO" && Array.isArray(installments) && installments.length) {
+  if (installments.length !== count) {
+    return res.status(400).json({
+      message: `installments tem ${installments.length} parcelas, mas installmentsCount é ${count}.`,
+    });
   }
-  const baseDue = parsedFirst || exp || new Date();
 
-  const paidNowBool = modeNorm === "AVISTA" ? toBool(paidNow) : false;
-  const now = new Date();
+  const built = validateAndBuildCustomInstallments({
+    installments,
+    totalCents: totals.totalCents,
+    methodNorm,
+  });
 
+  if (!built.ok) return res.status(400).json({ message: built.error });
+
+  finalFirstDueDate = built.firstDueDate;
+  installmentsData = built.installmentsData;
+} else {
+  // ✅ 2) Fallback: gera mensal automático (seu comportamento atual)
   const amounts = splitIntoInstallments(totals.totalCents, count);
-  const installmentsData = amounts.map((amt, idx) => {
+
+  installmentsData = amounts.map((amt, idx) => {
     const isFirst = idx === 0;
     const isPaid = paidNowBool && isFirst;
     return {
@@ -333,6 +415,10 @@ async function createOrder(req, res) {
       method: methodNorm || null,
     };
   });
+
+  finalFirstDueDate = baseDue;
+}
+
 
   const created = await prisma.$transaction(async (tx) => {
     const order = await tx.order.create({
@@ -350,7 +436,8 @@ async function createOrder(req, res) {
         paymentMode: modeNorm,
         paymentMethod: methodNorm || null,
         installmentsCount: count,
-        firstDueDate: baseDue,
+        firstDueDate: finalFirstDueDate,
+
 
         items: { create: itemsNorm },
       },
@@ -467,6 +554,7 @@ async function updateOrderFull(req, res) {
     installmentsCount,
     firstDueDate,
     paidNow,
+    installments, // ✅ NOVO (certo)
   } = req.body;
 
   const exists = await prisma.order.findFirst({
@@ -549,16 +637,42 @@ async function updateOrderFull(req, res) {
   }
 
   const parsedFirst = toDateOrNull(firstDueDate);
-  if (firstDueDate && !parsedFirst) {
-    return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+if (firstDueDate && !parsedFirst) {
+  return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+}
+
+// base (fallback) caso não venha lista custom
+const baseDue = parsedFirst || exp || new Date();
+
+const paidNowBool = modeNorm === "AVISTA" ? toBool(paidNow) : false;
+const now = new Date();
+
+let finalFirstDueDate = baseDue; // ✅ vai virar a menor data quando custom
+let installmentsData = [];       // ✅ vai ser custom OU mensal
+
+// ✅ 1) Se for PARCELADO e vier installments[] -> usa CUSTOM
+if (modeNorm === "PARCELADO" && Array.isArray(installments) && installments.length) {
+  if (installments.length !== count) {
+    return res.status(400).json({
+      message: `installments tem ${installments.length} parcelas, mas installmentsCount é ${count}.`,
+    });
   }
-  const baseDue = parsedFirst || exp || new Date();
 
-  const paidNowBool = modeNorm === "AVISTA" ? toBool(paidNow) : false;
-  const now = new Date();
+  const built = validateAndBuildCustomInstallments({
+    installments,
+    totalCents: totals.totalCents,
+    methodNorm,
+  });
 
+  if (!built.ok) return res.status(400).json({ message: built.error });
+
+  finalFirstDueDate = built.firstDueDate;
+  installmentsData = built.installmentsData;
+} else {
+  // ✅ 2) Fallback: gera mensal automático (seu comportamento atual)
   const amounts = splitIntoInstallments(totals.totalCents, count);
-  const installmentsData = amounts.map((amt, idx) => {
+
+  installmentsData = amounts.map((amt, idx) => {
     const isFirst = idx === 0;
     const isPaid = paidNowBool && isFirst;
     return {
@@ -570,6 +684,10 @@ async function updateOrderFull(req, res) {
       method: methodNorm || null,
     };
   });
+
+  finalFirstDueDate = baseDue;
+}
+
 
   const updated = await prisma.$transaction(async (tx) => {
     // atualiza order
@@ -587,7 +705,7 @@ async function updateOrderFull(req, res) {
         paymentMode: modeNorm,
         paymentMethod: methodNorm || null,
         installmentsCount: count,
-        firstDueDate: baseDue,
+        firstDueDate: finalFirstDueDate,
       },
       select: { id: true },
     });
