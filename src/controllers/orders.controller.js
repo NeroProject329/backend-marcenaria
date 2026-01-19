@@ -450,6 +450,186 @@ async function updateOrder(req, res) {
   return res.json({ order: updated });
 }
 
+// PATCH /api/orders/:id/full
+async function updateOrderFull(req, res) {
+  const { salonId } = req.user;
+  const { id } = req.params;
+
+  const {
+    clientId,
+    status,
+    expectedDeliveryAt,
+    notes,
+    discountCents,
+    items,
+    paymentMode,
+    paymentMethod,
+    installmentsCount,
+    firstDueDate,
+    paidNow,
+  } = req.body;
+
+  const exists = await prisma.order.findFirst({
+    where: { id, salonId },
+    select: { id: true },
+  });
+  if (!exists) return res.status(404).json({ message: "Pedido não encontrado." });
+
+  if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
+
+  const client = await prisma.client.findFirst({
+    where: { id: clientId, salonId },
+    select: { id: true },
+  });
+  if (!client) return res.status(404).json({ message: "Cliente não encontrado." });
+
+  const statusNorm = status ? normalizeStatus(status) : "ORCAMENTO";
+  if (status && statusNorm === null) return res.status(400).json({ message: "Status inválido." });
+
+  const exp = toDateOrNull(expectedDeliveryAt);
+  if (expectedDeliveryAt && !exp) {
+    return res.status(400).json({ message: "expectedDeliveryAt inválido (use ISO date)." });
+  }
+
+  const disc = discountCents !== undefined
+    ? toInt(discountCents, "discountCents")
+    : { ok: true, value: 0 };
+  if (!disc.ok) return res.status(400).json({ message: disc.message });
+  if (disc.value < 0) return res.status(400).json({ message: "discountCents inválido." });
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
+  }
+
+  // normaliza itens (igual createOrder)
+  const itemsNorm = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i] || {};
+    const name = String(it.name || "").trim();
+    if (name.length < 2) return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
+
+    const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
+    if (!q.ok) return res.status(400).json({ message: q.message });
+    if (q.value <= 0) return res.status(400).json({ message: `Item ${i + 1}: quantity inválido.` });
+
+    const up = toInt(it.unitPriceCents ?? 0, `items[${i}].unitPriceCents`);
+    if (!up.ok) return res.status(400).json({ message: up.message });
+    if (up.value < 0) return res.status(400).json({ message: `Item ${i + 1}: unitPriceCents inválido.` });
+
+    itemsNorm.push({
+      name,
+      description: it.description ? String(it.description).trim() : null,
+      quantity: q.value,
+      unitPriceCents: up.value,
+      totalCents: q.value * up.value,
+    });
+  }
+
+  const totals = calcTotals(itemsNorm, disc.value);
+
+  // pagamento (igual createOrder)
+  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
+  if (paymentMode !== undefined && modeNorm === null) {
+    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
+  }
+
+  const methodNorm = normalizePaymentMethod(paymentMethod);
+  if (paymentMethod !== undefined && methodNorm === null) {
+    return res.status(400).json({ message: "paymentMethod inválido." });
+  }
+
+  let count = 1;
+  if (modeNorm === "PARCELADO") {
+    const c = toInt(installmentsCount, "installmentsCount");
+    if (!c.ok) return res.status(400).json({ message: c.message });
+    if (c.value < 2 || c.value > 24) {
+      return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
+    }
+    count = c.value;
+  }
+
+  const parsedFirst = toDateOrNull(firstDueDate);
+  if (firstDueDate && !parsedFirst) {
+    return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+  }
+  const baseDue = parsedFirst || exp || new Date();
+
+  const paidNowBool = modeNorm === "AVISTA" ? toBool(paidNow) : false;
+  const now = new Date();
+
+  const amounts = splitIntoInstallments(totals.totalCents, count);
+  const installmentsData = amounts.map((amt, idx) => {
+    const isFirst = idx === 0;
+    const isPaid = paidNowBool && isFirst;
+    return {
+      number: idx + 1,
+      dueDate: addMonths(baseDue, idx),
+      amountCents: amt,
+      status: isPaid ? "PAGO" : "PENDENTE",
+      paidAt: isPaid ? now : null,
+      method: methodNorm || null,
+    };
+  });
+
+  const updated = await prisma.$transaction(async (tx) => {
+    // atualiza order
+    const order = await tx.order.update({
+      where: { id },
+      data: {
+        clientId,
+        status: statusNorm || "ORCAMENTO",
+        expectedDeliveryAt: exp,
+        notes: notes ? String(notes).trim() : null,
+        discountCents: disc.value,
+        subtotalCents: totals.subtotalCents,
+        totalCents: totals.totalCents,
+
+        paymentMode: modeNorm,
+        paymentMethod: methodNorm || null,
+        installmentsCount: count,
+        firstDueDate: baseDue,
+      },
+      select: { id: true },
+    });
+
+    // troca itens
+    await tx.orderItem.deleteMany({ where: { orderId: id } });
+    await tx.orderItem.createMany({
+      data: itemsNorm.map((it) => ({ ...it, orderId: id })),
+    });
+
+    // refaz recebíveis/parcelas (simples e seguro)
+    const recs = await tx.receivable.findMany({
+      where: { orderId: id },
+      select: { id: true },
+    });
+    const recIds = recs.map((r) => r.id);
+
+    if (recIds.length) {
+      await tx.receivableInstallment.deleteMany({
+        where: { receivableId: { in: recIds } },
+      });
+      await tx.receivable.deleteMany({ where: { orderId: id } });
+    }
+
+    await tx.receivable.create({
+      data: {
+        salonId,
+        orderId: id,
+        totalCents: totals.totalCents,
+        method: methodNorm || null,
+        installments: { create: installmentsData },
+      },
+      select: { id: true },
+    });
+
+    return order;
+  });
+
+  return res.json({ ok: true, orderId: updated.id });
+}
+
+
 // POST /api/orders/:id/cancel
 async function cancelOrder(req, res) {
   const { salonId } = req.user;
@@ -522,4 +702,5 @@ module.exports = {
   updateOrder,
   cancelOrder,
    deleteOrder,
+   updateOrderFull,
 };

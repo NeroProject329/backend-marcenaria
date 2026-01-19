@@ -8,6 +8,7 @@ const {
   updateOrder,
   cancelOrder,
    deleteOrder,
+   updateOrderFull,
 } = require("../controllers/orders.controller");
 
 router.use(requireAuth);
@@ -23,5 +24,7 @@ router.patch("/:id", updateOrder);
 router.post("/:id/cancel", cancelOrder);
 
 router.delete("/:id", deleteOrder);
+
+router.patch("/:id/full", updateOrderFull);
 
 module.exports = router;
