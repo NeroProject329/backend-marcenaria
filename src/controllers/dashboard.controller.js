@@ -55,6 +55,30 @@ async function overview(req, res) {
   const ordersMonthCount = ordersMonth._count.id || 0;
   const ordersMonthTotalCents = ordersMonth._sum.totalCents || 0;
 
+  // 2.1) recebido no mês (PAGO) - por paidAt
+const recPaidMonth = await prisma.receivableInstallment.aggregate({
+  where: {
+    receivable: { salonId },
+    status: "PAGO",
+    paidAt: { gte: monthStart, lt: monthEnd },
+  },
+  _sum: { amountCents: true },
+});
+
+// 2.2) pago no mês (despesas) - por paidAt
+const payPaidMonth = await prisma.payableInstallment.aggregate({
+  where: {
+    payable: { salonId },
+    status: "PAGO",
+    paidAt: { gte: monthStart, lt: monthEnd },
+  },
+  _sum: { amountCents: true },
+});
+
+const receivedPaidMonthCents = recPaidMonth._sum.amountCents || 0;
+const expensesPaidMonthCents = payPaidMonth._sum.amountCents || 0;
+
+
   // 3) próximas entregas (status em andamento + expectedDeliveryAt)
   const upcomingDeliveries = await prisma.order.findMany({
     where: {
@@ -132,6 +156,9 @@ async function overview(req, res) {
       labels,
       receivablesCents: receivablesSeries,
       payablesCents: payablesSeries,
+      // ✅ novos cards:
+  receivedPaidMonthCents,
+  expensesPaidMonthCents,
     },
   });
 }
