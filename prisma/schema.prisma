@@ -67,7 +67,6 @@ enum BudgetStatus {
   CANCELADO
 }
 
-
 model User {
   id        String   @id @default(cuid())
   name      String
@@ -109,8 +108,7 @@ model Salon {
   receivables      Receivable[]
   payables         Payable[]
   costs            Cost[]
-                   budgets Budget[]
-
+  budgets          Budget[]
 
   @@index([plan, planStatus])
 }
@@ -147,8 +145,7 @@ model Client {
   orders       Order[]
   payables     Payable[]
   costs        Cost[]
-  budgets Budget[]
-
+  budgets      Budget[]
 
   @@index([salonId, type])
 }
@@ -266,6 +263,7 @@ model Order {
   items       OrderItem[]
   deliveries  Delivery[]
   receivables Receivable[]
+  budgets     Budget[]
 
   @@index([salonId, createdAt])
   @@index([salonId, status])
@@ -284,7 +282,7 @@ model Budget {
   client   Client @relation(fields: [clientId], references: [id])
 
   salonId String
-  salon   Salon @relation(fields: [salonId], references: [id])
+  salon   Salon  @relation(fields: [salonId], references: [id])
 
   // valores (centavos)
   subtotalCents Int @default(0)
@@ -304,7 +302,7 @@ model Budget {
   // quando aprovar, vira pedido
   approvedAt      DateTime?
   approvedOrderId String?
-  approvedOrder   Order? @relation(fields: [approvedOrderId], references: [id])
+  approvedOrder   Order?    @relation(fields: [approvedOrderId], references: [id])
 
   items        BudgetItem[]
   installments BudgetInstallment[]
@@ -314,7 +312,6 @@ model Budget {
   @@index([clientId])
   @@index([approvedOrderId])
 }
-
 
 model OrderItem {
   id String @id @default(cuid())
@@ -342,7 +339,7 @@ model BudgetItem {
 
   name        String
   description String?
-  quantity    Int @default(1)
+  quantity    Int     @default(1)
 
   unitPriceCents Int @default(0)
   totalCents     Int @default(0)
@@ -367,7 +364,6 @@ model BudgetInstallment {
   @@index([budgetId])
   @@index([dueDate])
 }
-
 
 model Delivery {
   id String @id @default(cuid())
