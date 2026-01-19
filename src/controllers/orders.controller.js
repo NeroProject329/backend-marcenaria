@@ -470,10 +470,50 @@ async function cancelOrder(req, res) {
   return res.json({ order });
 }
 
+// DELETE /api/orders/:id
+async function deleteOrder(req, res) {
+  const { salonId } = req.user;
+  const { id } = req.params;
+
+  const order = await prisma.order.findFirst({
+    where: { id, salonId },
+    select: { id: true },
+  });
+
+  if (!order) {
+    return res.status(404).json({ message: "Pedido não encontrado." });
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // remove parcelas / recebíveis
+    await tx.installment.deleteMany({
+      where: { receivable: { orderId: id } },
+    });
+
+    await tx.receivable.deleteMany({
+      where: { orderId: id },
+    });
+
+    // remove itens
+    await tx.orderItem.deleteMany({
+      where: { orderId: id },
+    });
+
+    // remove pedido
+    await tx.order.delete({
+      where: { id },
+    });
+  });
+
+  return res.json({ ok: true });
+}
+
+
 module.exports = {
   listOrders,
   getOrder,
   createOrder,
   updateOrder,
   cancelOrder,
+   deleteOrder,
 };
