@@ -150,15 +150,16 @@ const expensesPaidMonthCents = payPaidMonth._sum.amountCents || 0;
       clientsCount,
       ordersMonthCount,
       ordersMonthTotalCents,
+           // ✅ novos cards:
+  receivedPaidMonthCents,
+  expensesPaidMonthCents,
     },
     upcomingDeliveries,
     charts: {
       labels,
       receivablesCents: receivablesSeries,
       payablesCents: payablesSeries,
-      // ✅ novos cards:
-  receivedPaidMonthCents,
-  expensesPaidMonthCents,
+ 
     },
   });
 }
