@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const { budgetPdf } = require("../controllers/budgetsPdf.controller");
 const { requireAuth } = require("../middlewares/auth.middleware");
 
 const {
@@ -32,5 +33,8 @@ router.post("/:id/cancel", cancelBudget);
 
 // opcional
 router.delete("/:id", deleteBudget);
+
+router.get("/:id/pdf", budgetPdf);
+
 
 module.exports = router;

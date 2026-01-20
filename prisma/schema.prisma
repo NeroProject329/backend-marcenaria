@@ -263,7 +263,7 @@ model Order {
   items       OrderItem[]
   deliveries  Delivery[]
   receivables Receivable[]
-  budgets     Budget[]
+  budget      Budget?
 
   @@index([salonId, createdAt])
   @@index([salonId, status])
@@ -301,7 +301,7 @@ model Budget {
 
   // quando aprovar, vira pedido
   approvedAt      DateTime?
-  approvedOrderId String?
+  approvedOrderId String?   @unique
   approvedOrder   Order?    @relation(fields: [approvedOrderId], references: [id])
 
   items        BudgetItem[]
