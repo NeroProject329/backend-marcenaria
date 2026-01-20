@@ -124,8 +124,14 @@ async function createCost(req, res) {
     return res.status(400).json({ message: "amountCents inválido." });
   }
 
+  // ✅ occurredAt opcional: se não vier, usa hoje
+let occDate = new Date();
+if (occurredAt !== undefined && occurredAt !== null && occurredAt !== "") {
   const occ = toDate(occurredAt, "occurredAt");
   if (!occ.ok) return res.status(400).json({ message: occ.message });
+  occDate = occ.value;
+}
+
 
   if (supplierId) {
     const supplier = await prisma.client.findFirst({
@@ -144,7 +150,7 @@ async function createCost(req, res) {
       name: String(name).trim(),
       type: t,
       amountCents: amt.value,
-      occurredAt: occ.value,
+      occurredAt: occDate,
       description: description ? String(description).trim() : null,
       supplierId: supplierId || null,
     },
