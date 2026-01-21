@@ -346,8 +346,8 @@ model BudgetItem {
   unitPriceCents Int @default(0)
   totalCents     Int @default(0)
 
-  createdAt           DateTime             @default(now())
-  budgetItemMaterials BudgetItemMaterial[]
+  createdAt DateTime             @default(now())
+  materials BudgetItemMaterial[]
 
   @@index([budgetId])
 }
