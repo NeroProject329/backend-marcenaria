@@ -16,6 +16,7 @@ const payablesRoutes = require("./routes/payables.routes");
 const costsRoutes = require("./routes/costs.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
 const budgetsRoutes = require("./routes/budgets.routes");
+const materialsRoutes = require("./routes/materials.routes");
 
 
 const app = express();
@@ -38,6 +39,7 @@ app.use("/api/payables", payablesRoutes);
 app.use("/api/costs", costsRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/budgets", budgetsRoutes);
+app.use("/api/materials", materialsRoutes);
 
 
 
