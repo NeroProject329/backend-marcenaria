@@ -445,6 +445,12 @@ async function updateBudgetFull(req, res) {
     installmentsCount,
     firstDueDate,
     installments, // custom
+    deliveryDays,
+    dailyRateCents,
+    discountType,
+    discountPercent,
+    cardFeePercent,
+
   } = req.body;
 
   if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
@@ -601,6 +607,13 @@ async function updateBudgetFull(req, res) {
         paymentMethod: methodNorm || null,
         installmentsCount: count,
         firstDueDate: finalFirstDueDate,
+        
+        deliveryDays: deliveryDays ?? null,
+        dailyRateCents: dailyRateCents ?? null,
+        discountType: discountType ?? null,
+        discountPercent: discountPercent ?? null,
+        cardFeePercent: cardFeePercent ?? 12.3,
+
       },
       select: { id: true },
     });
