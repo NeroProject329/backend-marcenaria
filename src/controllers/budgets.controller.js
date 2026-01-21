@@ -185,7 +185,10 @@ async function getBudget(req, res) {
     where: { id, salonId },
     include: {
       client: { select: { id: true, name: true, phone: true, instagram: true, notes: true, type: true } },
-      items: { orderBy: { createdAt: "asc" } },
+      items: {
+        orderBy: { createdAt: "asc" },
+        include: { materials: { orderBy: { createdAt: "asc" } } },
+      },
       installments: { orderBy: { number: "asc" } },
       approvedOrder: { select: { id: true, status: true, createdAt: true } },
     },
@@ -194,6 +197,7 @@ async function getBudget(req, res) {
   if (!budget) return res.status(404).json({ message: "Orçamento não encontrado." });
   return res.json({ budget });
 }
+
 
 // =====================
 // POST /api/budgets
@@ -236,31 +240,70 @@ async function createBudget(req, res) {
     return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
   }
 
-  // normaliza itens
+  // normaliza itens + materiais
   const itemsNorm = [];
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i] || {};
-    const name = String(it.name || "").trim();
-    if (name.length < 2) return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
+  try {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      const name = String(it.name || "").trim();
+      if (name.length < 2) throw new Error(`Item ${i + 1}: nome inválido.`);
 
-    const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
-    if (!q.ok) return res.status(400).json({ message: q.message });
-    if (q.value <= 0) return res.status(400).json({ message: `Item ${i + 1}: quantity inválido.` });
+      const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
+      if (!q.ok) throw new Error(q.message);
+      if (q.value <= 0) throw new Error(`Item ${i + 1}: quantity inválido.`);
 
-    const up = toInt(it.unitPriceCents ?? 0, `items[${i}].unitPriceCents`);
-    if (!up.ok) return res.status(400).json({ message: up.message });
-    if (up.value < 0) return res.status(400).json({ message: `Item ${i + 1}: unitPriceCents inválido.` });
+      const up = toInt(it.unitPriceCents ?? 0, `items[${i}].unitPriceCents`);
+      if (!up.ok) throw new Error(up.message);
+      if (up.value < 0) throw new Error(`Item ${i + 1}: unitPriceCents inválido.`);
 
-    itemsNorm.push({
-      name,
-      description: it.description ? String(it.description).trim() : null,
-      quantity: q.value,
-      unitPriceCents: up.value,
-      totalCents: q.value * up.value,
-    });
+      // materiais (opcional)
+      let materialsNorm = [];
+      if (Array.isArray(it.materials)) {
+        materialsNorm = it.materials
+          .filter((m) => m && String(m.name || "").trim())
+          .map((m, midx) => {
+            const mName = String(m.name || "").trim();
+            const qty = Number(m.qty);
+            const unitCostCents = Number(m.unitCostCents);
+
+            if (!Number.isFinite(qty) || qty <= 0) {
+              throw new Error(`Item ${i + 1} material ${midx + 1}: qty inválido.`);
+            }
+            if (!Number.isFinite(unitCostCents) || unitCostCents < 0) {
+              throw new Error(`Item ${i + 1} material ${midx + 1}: unitCostCents inválido.`);
+            }
+
+            return {
+              name: mName,
+              qty,
+              unitCostCents: Math.trunc(unitCostCents),
+            };
+          });
+      }
+
+      itemsNorm.push({
+        name,
+        description: it.description ? String(it.description).trim() : null,
+        quantity: q.value,
+        unitPriceCents: up.value,
+        totalCents: q.value * up.value,
+        materials: materialsNorm,
+      });
+    }
+  } catch (e) {
+    return res.status(400).json({ message: e.message || "Itens/materiais inválidos." });
   }
 
-  const totals = calcTotals(itemsNorm, disc.value);
+  const totals = calcTotals(
+    itemsNorm.map((x) => ({
+      name: x.name,
+      description: x.description,
+      quantity: x.quantity,
+      unitPriceCents: x.unitPriceCents,
+      totalCents: x.totalCents,
+    })),
+    disc.value
+  );
 
   // pagamento sugerido
   const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
@@ -286,13 +329,11 @@ async function createBudget(req, res) {
     return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
   }
 
-  // base (fallback) se não vier lista custom
   const baseDue = parsedFirst || exp || new Date();
 
   let finalFirstDueDate = baseDue;
   let budgetInstallmentsData = [];
 
-  // custom installments (se PARCELADO e veio installments)
   if (modeNorm === "PARCELADO" && Array.isArray(installments) && installments.length) {
     if (installments.length !== count) {
       return res.status(400).json({
@@ -310,7 +351,6 @@ async function createBudget(req, res) {
     finalFirstDueDate = built.firstDueDate;
     budgetInstallmentsData = built.installmentsData;
   } else if (modeNorm === "PARCELADO") {
-    // gera mensal automático (só para orçamento)
     const amounts = splitIntoInstallments(totals.totalCents, count);
     budgetInstallmentsData = amounts.map((amt, idx) => ({
       number: idx + 1,
@@ -319,7 +359,6 @@ async function createBudget(req, res) {
     }));
     finalFirstDueDate = baseDue;
   } else {
-    // AVISTA -> 1 parcela “virtual”
     budgetInstallmentsData = [];
     finalFirstDueDate = baseDue;
   }
@@ -340,12 +379,23 @@ async function createBudget(req, res) {
       installmentsCount: count,
       firstDueDate: finalFirstDueDate,
 
-      items: { create: itemsNorm },
+      // itens + materiais (nested)
+      items: {
+        create: itemsNorm.map((it) => ({
+          name: it.name,
+          description: it.description,
+          quantity: it.quantity,
+          unitPriceCents: it.unitPriceCents,
+          totalCents: it.totalCents,
+          ...(it.materials?.length ? { materials: { create: it.materials } } : {}),
+        })),
+      },
+
       ...(budgetInstallmentsData.length ? { installments: { create: budgetInstallmentsData } } : {}),
     },
     include: {
       client: { select: { id: true, name: true, phone: true, type: true } },
-      items: true,
+      items: { include: { materials: true }, orderBy: { createdAt: "asc" } },
       installments: { orderBy: { number: "asc" } },
     },
   });
@@ -353,10 +403,11 @@ async function createBudget(req, res) {
   return res.status(201).json({ budget: created });
 }
 
+
 // =====================
 // PATCH /api/budgets/:id  (simples)
 // =====================
-async function updateBudget(req, res) {
+async function updateBudgetFull(req, res) {
   const { salonId } = req.user;
   const { id } = req.params;
 
@@ -366,44 +417,218 @@ async function updateBudget(req, res) {
   });
   if (!exists) return res.status(404).json({ message: "Orçamento não encontrado." });
 
-  const { status, expectedDeliveryAt, notes } = req.body;
+  if (exists.status === "APROVADO") {
+    return res.status(409).json({ message: "Orçamento já aprovado. Não é possível editar." });
+  }
 
-  const data = {};
+  const {
+    clientId,
+    status,
+    expectedDeliveryAt,
+    notes,
+    discountCents,
+    items,
+    paymentMode,
+    paymentMethod,
+    installmentsCount,
+    firstDueDate,
+    installments, // custom
+  } = req.body;
 
-  if (status !== undefined) {
-    const s = normalizeBudgetStatus(status);
-    if (s === null) return res.status(400).json({ message: "status inválido." });
+  if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
 
-    // trava: não deixa mexer se já aprovado
-    if (exists.status === "APROVADO") {
-      return res.status(409).json({ message: "Orçamento já aprovado. Não é possível alterar status." });
+  const client = await prisma.client.findFirst({
+    where: { id: clientId, salonId },
+    select: { id: true },
+  });
+  if (!client) return res.status(404).json({ message: "Cliente não encontrado." });
+
+  const statusNorm = status ? normalizeBudgetStatus(status) : undefined;
+  if (status && statusNorm === null) return res.status(400).json({ message: "status inválido." });
+
+  const exp = toDateOrNull(expectedDeliveryAt);
+  if (expectedDeliveryAt && !exp) return res.status(400).json({ message: "expectedDeliveryAt inválido (use ISO date)." });
+
+  const disc = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
+  if (!disc.ok) return res.status(400).json({ message: disc.message });
+  if (disc.value < 0) return res.status(400).json({ message: "discountCents inválido." });
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
+  }
+
+  // normaliza itens + materiais
+  const itemsNorm = [];
+  try {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      const name = String(it.name || "").trim();
+      if (name.length < 2) throw new Error(`Item ${i + 1}: nome inválido.`);
+
+      const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
+      if (!q.ok) throw new Error(q.message);
+      if (q.value <= 0) throw new Error(`Item ${i + 1}: quantity inválido.`);
+
+      const up = toInt(it.unitPriceCents ?? 0, `items[${i}].unitPriceCents`);
+      if (!up.ok) throw new Error(up.message);
+      if (up.value < 0) throw new Error(`Item ${i + 1}: unitPriceCents inválido.`);
+
+      let materialsNorm = [];
+      if (Array.isArray(it.materials)) {
+        materialsNorm = it.materials
+          .filter((m) => m && String(m.name || "").trim())
+          .map((m, midx) => {
+            const mName = String(m.name || "").trim();
+            const qty = Number(m.qty);
+            const unitCostCents = Number(m.unitCostCents);
+
+            if (!Number.isFinite(qty) || qty <= 0) {
+              throw new Error(`Item ${i + 1} material ${midx + 1}: qty inválido.`);
+            }
+            if (!Number.isFinite(unitCostCents) || unitCostCents < 0) {
+              throw new Error(`Item ${i + 1} material ${midx + 1}: unitCostCents inválido.`);
+            }
+
+            return { name: mName, qty, unitCostCents: Math.trunc(unitCostCents) };
+          });
+      }
+
+      itemsNorm.push({
+        name,
+        description: it.description ? String(it.description).trim() : null,
+        quantity: q.value,
+        unitPriceCents: up.value,
+        totalCents: q.value * up.value,
+        materials: materialsNorm,
+      });
+    }
+  } catch (e) {
+    return res.status(400).json({ message: e.message || "Itens/materiais inválidos." });
+  }
+
+  const totals = calcTotals(
+    itemsNorm.map((x) => ({
+      name: x.name,
+      description: x.description,
+      quantity: x.quantity,
+      unitPriceCents: x.unitPriceCents,
+      totalCents: x.totalCents,
+    })),
+    disc.value
+  );
+
+  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
+  if (paymentMode !== undefined && modeNorm === null) {
+    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
+  }
+
+  const methodNorm = normalizePaymentMethod(paymentMethod);
+  if (paymentMethod !== undefined && methodNorm === null) {
+    return res.status(400).json({ message: "paymentMethod inválido." });
+  }
+
+  let count = 1;
+  if (modeNorm === "PARCELADO") {
+    const c = toInt(installmentsCount, "installmentsCount");
+    if (!c.ok) return res.status(400).json({ message: c.message });
+    if (c.value < 2 || c.value > 24) return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
+    count = c.value;
+  }
+
+  const parsedFirst = toDateOrNull(firstDueDate);
+  if (firstDueDate && !parsedFirst) return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+
+  const baseDue = parsedFirst || exp || new Date();
+
+  let finalFirstDueDate = baseDue;
+  let budgetInstallmentsData = [];
+
+  if (modeNorm === "PARCELADO" && Array.isArray(installments) && installments.length) {
+    if (installments.length !== count) {
+      return res.status(400).json({
+        message: `installments tem ${installments.length} parcelas, mas installmentsCount é ${count}.`,
+      });
     }
 
-    data.status = s;
+    const built = validateAndBuildBudgetInstallments({
+      installments,
+      totalCents: totals.totalCents,
+    });
+
+    if (!built.ok) return res.status(400).json({ message: built.error });
+
+    finalFirstDueDate = built.firstDueDate;
+    budgetInstallmentsData = built.installmentsData;
+  } else if (modeNorm === "PARCELADO") {
+    const amounts = splitIntoInstallments(totals.totalCents, count);
+    budgetInstallmentsData = amounts.map((amt, idx) => ({
+      number: idx + 1,
+      dueDate: addMonths(baseDue, idx),
+      amountCents: amt,
+    }));
+    finalFirstDueDate = baseDue;
+  } else {
+    budgetInstallmentsData = [];
+    finalFirstDueDate = baseDue;
   }
 
-  if (expectedDeliveryAt !== undefined) {
-    const d = toDateOrNull(expectedDeliveryAt);
-    if (expectedDeliveryAt && !d) return res.status(400).json({ message: "expectedDeliveryAt inválido." });
-    data.expectedDeliveryAt = d;
-  }
+  await prisma.$transaction(async (tx) => {
+    // update budget base
+    await tx.budget.update({
+      where: { id },
+      data: {
+        clientId,
+        ...(statusNorm ? { status: statusNorm } : {}),
+        expectedDeliveryAt: exp,
+        notes: notes ? String(notes).trim() : null,
+        discountCents: disc.value,
+        subtotalCents: totals.subtotalCents,
+        totalCents: totals.totalCents,
 
-  if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
+        paymentMode: modeNorm,
+        paymentMethod: methodNorm || null,
+        installmentsCount: count,
+        firstDueDate: finalFirstDueDate,
+      },
+      select: { id: true },
+    });
 
-  const budget = await prisma.budget.update({
-    where: { id },
-    data,
-    select: {
-      id: true,
-      status: true,
-      updatedAt: true,
-      expectedDeliveryAt: true,
-      notes: true,
-    },
+    // installments do orçamento (mantém sua lógica atual)
+    await tx.budgetInstallment.deleteMany({ where: { budgetId: id } });
+    if (budgetInstallmentsData.length) {
+      await tx.budgetInstallment.createMany({
+        data: budgetInstallmentsData.map((p) => ({ ...p, budgetId: id })),
+      });
+    }
+
+    // ===== itens + materiais =====
+    // apaga materiais dos itens desse budget
+    await tx.budgetItemMaterial.deleteMany({
+      where: { budgetItem: { budgetId: id } },
+    });
+
+    // apaga itens
+    await tx.budgetItem.deleteMany({ where: { budgetId: id } });
+
+    // recria itens + materiais (create com nested)
+    for (const it of itemsNorm) {
+      await tx.budgetItem.create({
+        data: {
+          budgetId: id,
+          name: it.name,
+          description: it.description,
+          quantity: it.quantity,
+          unitPriceCents: it.unitPriceCents,
+          totalCents: it.totalCents,
+          ...(it.materials?.length ? { materials: { create: it.materials } } : {}),
+        },
+      });
+    }
   });
 
-  return res.json({ budget });
+  return res.json({ ok: true, budgetId: id });
 }
+
 
 // =====================
 // PATCH /api/budgets/:id/full

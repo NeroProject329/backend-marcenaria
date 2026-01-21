@@ -328,6 +328,8 @@ model OrderItem {
 
   createdAt DateTime @default(now())
 
+  materials BudgetItemMaterial[]
+
   @@index([orderId])
 }
 
@@ -344,9 +346,32 @@ model BudgetItem {
   unitPriceCents Int @default(0)
   totalCents     Int @default(0)
 
-  createdAt DateTime @default(now())
+  createdAt           DateTime             @default(now())
+  budgetItemMaterials BudgetItemMaterial[]
 
   @@index([budgetId])
+}
+
+model BudgetItemMaterial {
+  id String @id @default(cuid())
+
+  budgetItemId String
+  budgetItem   BudgetItem @relation(fields: [budgetItemId], references: [id], onDelete: Cascade)
+
+  name String
+
+  // quantidade do material (pode ser decimal: 1.5m, 0.25L etc)
+  qty Float @default(1)
+
+  // custo unitário do material em centavos (inteiro)
+  unitCostCents Int @default(0)
+
+  createdAt   DateTime   @default(now())
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id])
+  orderItemId String?
+
+  @@index([budgetItemId])
+  @@index([name])
 }
 
 model BudgetInstallment {
