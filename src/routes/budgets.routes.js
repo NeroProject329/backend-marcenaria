@@ -6,7 +6,6 @@ const {
   listBudgets,
   getBudget,
   createBudget,
-  updateBudget,
   updateBudgetFull,
   sendBudget,
   approveBudget,
@@ -21,7 +20,6 @@ router.get("/:id", getBudget);
 router.post("/", createBudget);
 
 // update simples (status/observações/previsão)
-router.patch("/:id", updateBudget);
 
 // update completo (itens + pagamento + parcelas custom)
 router.patch("/:id/full", updateBudgetFull);
