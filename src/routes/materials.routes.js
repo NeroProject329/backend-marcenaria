@@ -13,15 +13,17 @@ const {
   // movements
   listMovements,
   createMovement,
+
+  // stock + summary
   materialsStock,
-  // summary
   materialsSummary,
 } = require("../controllers/materials.controller");
 
 router.use(requireAuth);
 
-// ⚠️ rotas específicas ANTES de "/:id"
+// ✅ rotas específicas ANTES de "/:id"
 router.get("/summary", materialsSummary);
+router.get("/stock", materialsStock);
 
 router.get("/movements", listMovements);
 router.post("/movements", createMovement);
@@ -33,6 +35,5 @@ router.post("/", createMaterial);
 router.get("/:id", getMaterial);
 router.patch("/:id", updateMaterial);
 router.delete("/:id", deleteMaterial);
-router.get("/stock", materialsStock);
 
 module.exports = router;
