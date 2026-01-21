@@ -206,6 +206,11 @@ async function createBudget(req, res) {
   const { salonId } = req.user;
 
   const {
+    deliveryDays,
+    dailyRateCents,
+    discountType,
+    discountPercent,
+    cardFeePercent,
     clientId,
     expectedDeliveryAt,
     notes,
@@ -373,6 +378,13 @@ async function createBudget(req, res) {
       discountCents: disc.value,
       subtotalCents: totals.subtotalCents,
       totalCents: totals.totalCents,
+
+      deliveryDays: deliveryDays ?? null,
+      dailyRateCents: dailyRateCents ?? null,
+      discountType: discountType ?? null,
+      discountPercent: discountPercent ?? null,
+      cardFeePercent: cardFeePercent ?? 12.3,
+
 
       paymentMode: modeNorm,
       paymentMethod: methodNorm || null,
