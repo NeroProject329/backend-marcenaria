@@ -1031,7 +1031,6 @@ module.exports = {
   listBudgets,
   getBudget,
   createBudget,
-  updateBudget,
   updateBudgetFull,
   sendBudget,
   approveBudget,
