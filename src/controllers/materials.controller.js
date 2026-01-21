@@ -299,6 +299,58 @@ async function createMovement(req, res) {
   return res.status(201).json({ movement: created });
 }
 
+// GET /api/materials/stock
+async function materialsStock(req, res) {
+  const { salonId } = req.user;
+
+  // pega todos materiais ativos (ou todos, se você quiser)
+  const materials = await prisma.material.findMany({
+    where: { salonId },
+    select: {
+      id: true,
+      name: true,
+      unit: true,
+      defaultUnitCostCents: true,
+      isActive: true,
+    },
+    orderBy: { name: "asc" },
+  });
+
+  // pega movimentos (tudo, pra saldo real)
+  const movements = await prisma.materialMovement.findMany({
+    where: { salonId },
+    select: { materialId: true, type: true, qty: true },
+  });
+
+  const map = new Map(); // materialId -> { in, out, adjust }
+  for (const mv of movements) {
+    const cur = map.get(mv.materialId) || { inQty: 0, outQty: 0, adjustQty: 0 };
+    if (mv.type === "IN") cur.inQty += Number(mv.qty || 0);
+    else if (mv.type === "OUT") cur.outQty += Number(mv.qty || 0);
+    else cur.adjustQty += Number(mv.qty || 0); // ADJUST soma (se quiser ajuste negativo, a gente evolui depois)
+    map.set(mv.materialId, cur);
+  }
+
+  const stock = materials.map((m) => {
+    const s = map.get(m.id) || { inQty: 0, outQty: 0, adjustQty: 0 };
+    const balanceQty = (s.inQty + s.adjustQty) - s.outQty;
+    return {
+      materialId: m.id,
+      name: m.name,
+      unit: m.unit,
+      isActive: m.isActive,
+      defaultUnitCostCents: m.defaultUnitCostCents,
+      inQty: s.inQty,
+      outQty: s.outQty,
+      adjustQty: s.adjustQty,
+      balanceQty,
+    };
+  });
+
+  return res.json({ stock });
+}
+
+
 // GET /api/materials/summary?month=YYYY-MM
 async function materialsSummary(req, res) {
   const { salonId } = req.user;
@@ -386,4 +438,5 @@ module.exports = {
 
   // summary
   materialsSummary,
+  materialsStock,
 };

@@ -13,7 +13,7 @@ const {
   // movements
   listMovements,
   createMovement,
-
+  materialsStock,
   // summary
   materialsSummary,
 } = require("../controllers/materials.controller");
@@ -33,5 +33,6 @@ router.post("/", createMaterial);
 router.get("/:id", getMaterial);
 router.patch("/:id", updateMaterial);
 router.delete("/:id", deleteMaterial);
+router.get("/stock", materialsStock);
 
 module.exports = router;
