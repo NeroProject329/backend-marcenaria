@@ -67,6 +67,29 @@ enum BudgetStatus {
   CANCELADO
 }
 
+enum MaterialUnit {
+  UN
+  M
+  M2
+  M3
+  L
+  KG
+  CX
+  OUTRO
+}
+
+enum MaterialMovementType {
+  IN // compra/entrada
+  OUT // consumo/saída
+  ADJUST // ajuste
+}
+
+enum MaterialMovementSource {
+  MANUAL
+  ORDER
+  PURCHASE
+}
+
 model User {
   id        String   @id @default(cuid())
   name      String
@@ -99,16 +122,18 @@ model Salon {
   planEndsAt  DateTime?
   trialEndsAt DateTime?
 
-  services         Service[]
-  clients          Client[]
-  appointments     Appointment[]
-  cashCategories   CashCategory[]
-  cashTransactions CashTransaction[]
-  orders           Order[]
-  receivables      Receivable[]
-  payables         Payable[]
-  costs            Cost[]
-  budgets          Budget[]
+  services          Service[]
+  clients           Client[]
+  appointments      Appointment[]
+  cashCategories    CashCategory[]
+  cashTransactions  CashTransaction[]
+  orders            Order[]
+  receivables       Receivable[]
+  payables          Payable[]
+  costs             Cost[]
+  budgets           Budget[]
+  materials         Material[]
+  materialMovements MaterialMovement[]
 
   @@index([plan, planStatus])
 }
@@ -260,10 +285,11 @@ model Order {
 
   notes String?
 
-  items       OrderItem[]
-  deliveries  Delivery[]
-  receivables Receivable[]
-  budget      Budget?
+  items             OrderItem[]
+  deliveries        Delivery[]
+  receivables       Receivable[]
+  budget            Budget?
+  materialMovements MaterialMovement[]
 
   @@index([salonId, createdAt])
   @@index([salonId, status])
@@ -300,13 +326,12 @@ model Budget {
   notes              String?
 
   // cálculo / composição
-  deliveryDays      Int?   // dias previstos (opcional)
-  dailyRateCents    Int?   // valor dia em centavos (mão de obra)
+  deliveryDays   Int? // dias previstos (opcional)
+  dailyRateCents Int? // valor dia em centavos (mão de obra)
 
-  discountType      String? // "VALOR" | "PERCENT"
-  discountPercent   Float?  // ex: 10, 15, 20
-  cardFeePercent    Float?  // ex: 12.3 (pra mostrar e recalcular)
-
+  discountType    String? // "VALOR" | "PERCENT"
+  discountPercent Float? // ex: 10, 15, 20
+  cardFeePercent  Float? // ex: 12.3 (pra mostrar e recalcular)
 
   // quando aprovar, vira pedido
   approvedAt      DateTime?
@@ -378,7 +403,10 @@ model BudgetItemMaterial {
   createdAt   DateTime   @default(now())
   orderItem   OrderItem? @relation(fields: [orderItemId], references: [id])
   orderItemId String?
+  materialId  String?
+  material    Material?  @relation(fields: [materialId], references: [id])
 
+  @@index([materialId])
   @@index([budgetItemId])
   @@index([name])
 }
@@ -527,4 +555,59 @@ model Cost {
   @@index([salonId, occurredAt])
   @@index([salonId, type])
   @@index([supplierId])
+}
+
+model Material {
+  id String @id @default(cuid())
+
+  salonId String
+  salon   Salon  @relation(fields: [salonId], references: [id])
+
+  name String
+  unit MaterialUnit @default(UN)
+
+  // custo padrão estimado (pra sugerir no orçamento)
+  defaultUnitCostCents Int @default(0)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  movements           MaterialMovement[]
+  budgetItemMaterials BudgetItemMaterial[]
+
+  @@unique([salonId, name])
+  @@index([salonId, isActive])
+  @@index([salonId, name])
+}
+
+model MaterialMovement {
+  id String @id @default(cuid())
+
+  salonId String
+  salon   Salon  @relation(fields: [salonId], references: [id])
+
+  materialId String
+  material   Material @relation(fields: [materialId], references: [id])
+
+  type   MaterialMovementType
+  source MaterialMovementSource @default(MANUAL)
+
+  qty           Float
+  unitCostCents Int      @default(0) // custo unit no momento (pra IN) ou custo médio/estimado (pra OUT, se quiser)
+  occurredAt    DateTime
+
+  notes String?
+
+  // opcional: linkar com Order quando você quiser automatizar depois
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([salonId, occurredAt])
+  @@index([salonId, type])
+  @@index([materialId])
+  @@index([orderId])
 }
