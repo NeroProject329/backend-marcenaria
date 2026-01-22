@@ -57,42 +57,89 @@ function normalizeMovementSource(v) {
 // Materials (Catalog)
 // --------------------
 // GET /api/materials?q=...&active=1
+// GET /api/materials?q=...&active=1&supplierId=...
 async function listMaterials(req, res) {
   const { salonId } = req.user;
 
   const q = String(req.query.q || "").trim();
   const active = req.query.active === undefined ? null : String(req.query.active) === "1";
+  const supplierId = req.query.supplierId ? String(req.query.supplierId).trim() : null;
 
   const where = { salonId };
+
   if (active !== null) where.isActive = active;
 
+  // filtro por fornecedor (material que tenha pelo menos 1 preço daquele fornecedor)
+  if (supplierId) {
+    where.supplierPrices = { some: { supplierId } };
+  }
+
+  // busca por material OU fornecedor
   if (q) {
-    where.name = { contains: q, mode: "insensitive" };
+    where.OR = [
+      { name: { contains: q, mode: "insensitive" } },
+      {
+        supplierPrices: {
+          some: {
+            supplier: { name: { contains: q, mode: "insensitive" } },
+          },
+        },
+      },
+    ];
   }
 
   const materials = await prisma.material.findMany({
     where,
     orderBy: [{ name: "asc" }],
-    select: {
-      id: true,
-      name: true,
-      unit: true,
-      defaultUnitCostCents: true,
-      isActive: true,
-      createdAt: true,
-      updatedAt: true,
+    include: {
+      supplierPrices: {
+        orderBy: { unitCostCents: "asc" }, // já vem do menor pro maior
+        include: {
+          supplier: { select: { id: true, name: true, phone: true, type: true } },
+        },
+      },
     },
-    take: 100,
+    take: 200,
   });
 
-  return res.json({ materials });
+  // devolve também o "melhor preço" pronto pro front
+  const mapped = materials.map((m) => {
+    const best = (m.supplierPrices || [])[0] || null;
+    return {
+      id: m.id,
+      name: m.name,
+      unit: m.unit,
+      defaultUnitCostCents: m.defaultUnitCostCents,
+      isActive: m.isActive,
+      createdAt: m.createdAt,
+      updatedAt: m.updatedAt,
+
+      supplierPrices: (m.supplierPrices || []).map((sp) => ({
+        id: sp.id,
+        supplierId: sp.supplierId,
+        unitCostCents: sp.unitCostCents,
+        supplier: sp.supplier,
+      })),
+
+      bestSupplier: best
+        ? {
+            supplierId: best.supplierId,
+            name: best.supplier?.name || "-",
+            unitCostCents: best.unitCostCents,
+          }
+        : null,
+    };
+  });
+
+  return res.json({ materials: mapped });
 }
+
 
 // POST /api/materials
 async function createMaterial(req, res) {
   const { salonId } = req.user;
 
-  const { name, unit, defaultUnitCostCents, isActive } = req.body || {};
+  const { name, unit, defaultUnitCostCents, isActive, suppliers } = req.body || {};
 
   const n = String(name || "").trim();
   if (n.length < 2) return res.status(400).json({ message: "name é obrigatório (mín 2 caracteres)." });
@@ -100,9 +147,40 @@ async function createMaterial(req, res) {
   const unitNorm = normalizeUnit(unit) || "UN";
   if (unit !== undefined && unitNorm === null) return res.status(400).json({ message: "unit inválida." });
 
-  const cost = defaultUnitCostCents !== undefined ? toInt(defaultUnitCostCents, "defaultUnitCostCents") : { ok: true, value: 0 };
+  const cost = defaultUnitCostCents !== undefined
+    ? toInt(defaultUnitCostCents, "defaultUnitCostCents")
+    : { ok: true, value: 0 };
   if (!cost.ok) return res.status(400).json({ message: cost.message });
   if (cost.value < 0) return res.status(400).json({ message: "defaultUnitCostCents inválido." });
+
+  // --- valida suppliers ---
+  const supplierList = Array.isArray(suppliers) ? suppliers : [];
+  const cleaned = supplierList
+    .map((s) => ({
+      supplierId: s?.supplierId ? String(s.supplierId).trim() : null,
+      unitCostCents: Number(s?.unitCostCents),
+    }))
+    .filter((s) => s.supplierId && Number.isInteger(s.unitCostCents) && s.unitCostCents >= 0);
+
+  // remove duplicados por supplierId (último vence)
+  const uniqMap = new Map();
+  cleaned.forEach((s) => uniqMap.set(s.supplierId, s));
+  const uniq = Array.from(uniqMap.values());
+
+  // se veio fornecedor, valida se é FORNECEDOR/BOTH do mesmo salão
+  if (uniq.length) {
+    const ids = uniq.map((x) => x.supplierId);
+    const found = await prisma.client.findMany({
+      where: { salonId, id: { in: ids }, type: { in: ["FORNECEDOR", "BOTH"] } },
+      select: { id: true },
+    });
+
+    const okSet = new Set(found.map((f) => f.id));
+    const invalid = ids.filter((id) => !okSet.has(id));
+    if (invalid.length) {
+      return res.status(400).json({ message: "Há fornecedor inválido (não é FORNECEDOR/BOTH ou não pertence ao salão)." });
+    }
+  }
 
   try {
     const created = await prisma.material.create({
@@ -113,23 +191,37 @@ async function createMaterial(req, res) {
         defaultUnitCostCents: cost.value,
         isActive: isActive === undefined ? true : Boolean(isActive),
       },
-      select: {
-        id: true,
-        name: true,
-        unit: true,
-        defaultUnitCostCents: true,
-        isActive: true,
-        createdAt: true,
-        updatedAt: true,
+      select: { id: true },
+    });
+
+    if (uniq.length) {
+      await prisma.materialSupplierPrice.createMany({
+        data: uniq.map((s) => ({
+          materialId: created.id,
+          supplierId: s.supplierId,
+          unitCostCents: s.unitCostCents,
+        })),
+        skipDuplicates: true,
+      });
+    }
+
+    // devolve completo já
+    const materialFull = await prisma.material.findFirst({
+      where: { id: created.id, salonId },
+      include: {
+        supplierPrices: {
+          orderBy: { unitCostCents: "asc" },
+          include: { supplier: { select: { id: true, name: true, phone: true, type: true } } },
+        },
       },
     });
 
-    return res.status(201).json({ material: created });
+    return res.status(201).json({ material: materialFull });
   } catch (e) {
-    // unique constraint (salonId, name)
     return res.status(409).json({ message: "Material já existe (mesmo nome)." });
   }
 }
+
 
 // GET /api/materials/:id
 async function getMaterial(req, res) {
@@ -138,20 +230,18 @@ async function getMaterial(req, res) {
 
   const material = await prisma.material.findFirst({
     where: { id, salonId },
-    select: {
-      id: true,
-      name: true,
-      unit: true,
-      defaultUnitCostCents: true,
-      isActive: true,
-      createdAt: true,
-      updatedAt: true,
+    include: {
+      supplierPrices: {
+        orderBy: { unitCostCents: "asc" },
+        include: { supplier: { select: { id: true, name: true, phone: true, type: true } } },
+      },
     },
   });
 
   if (!material) return res.status(404).json({ message: "Material não encontrado." });
   return res.json({ material });
 }
+
 
 // PATCH /api/materials/:id
 async function updateMaterial(req, res) {
@@ -161,7 +251,7 @@ async function updateMaterial(req, res) {
   const exists = await prisma.material.findFirst({ where: { id, salonId }, select: { id: true } });
   if (!exists) return res.status(404).json({ message: "Material não encontrado." });
 
-  const { name, unit, defaultUnitCostCents, isActive } = req.body || {};
+  const { name, unit, defaultUnitCostCents, isActive, suppliers } = req.body || {};
   const data = {};
 
   if (name !== undefined) {
@@ -185,26 +275,77 @@ async function updateMaterial(req, res) {
 
   if (isActive !== undefined) data.isActive = Boolean(isActive);
 
+  // --- suppliers update (se veio no payload) ---
+  const hasSuppliersField = Object.prototype.hasOwnProperty.call(req.body || {}, "suppliers");
+  let uniq = null;
+
+  if (hasSuppliersField) {
+    const supplierList = Array.isArray(suppliers) ? suppliers : [];
+    const cleaned = supplierList
+      .map((s) => ({
+        supplierId: s?.supplierId ? String(s.supplierId).trim() : null,
+        unitCostCents: Number(s?.unitCostCents),
+      }))
+      .filter((s) => s.supplierId && Number.isInteger(s.unitCostCents) && s.unitCostCents >= 0);
+
+    const uniqMap = new Map();
+    cleaned.forEach((s) => uniqMap.set(s.supplierId, s));
+    uniq = Array.from(uniqMap.values());
+
+    if (uniq.length) {
+      const ids = uniq.map((x) => x.supplierId);
+      const found = await prisma.client.findMany({
+        where: { salonId, id: { in: ids }, type: { in: ["FORNECEDOR", "BOTH"] } },
+        select: { id: true },
+      });
+
+      const okSet = new Set(found.map((f) => f.id));
+      const invalid = ids.filter((id) => !okSet.has(id));
+      if (invalid.length) {
+        return res.status(400).json({ message: "Há fornecedor inválido (não é FORNECEDOR/BOTH ou não pertence ao salão)." });
+      }
+    }
+  }
+
   try {
-    const updated = await prisma.material.update({
+    await prisma.material.update({
       where: { id },
       data,
-      select: {
-        id: true,
-        name: true,
-        unit: true,
-        defaultUnitCostCents: true,
-        isActive: true,
-        createdAt: true,
-        updatedAt: true,
+      select: { id: true },
+    });
+
+    // se veio suppliers no PATCH, substitui lista inteira (simples e confiável)
+    if (uniq !== null) {
+      await prisma.materialSupplierPrice.deleteMany({ where: { materialId: id } });
+
+      if (uniq.length) {
+        await prisma.materialSupplierPrice.createMany({
+          data: uniq.map((s) => ({
+            materialId: id,
+            supplierId: s.supplierId,
+            unitCostCents: s.unitCostCents,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    }
+
+    const materialFull = await prisma.material.findFirst({
+      where: { id, salonId },
+      include: {
+        supplierPrices: {
+          orderBy: { unitCostCents: "asc" },
+          include: { supplier: { select: { id: true, name: true, phone: true, type: true } } },
+        },
       },
     });
 
-    return res.json({ material: updated });
+    return res.json({ material: materialFull });
   } catch (e) {
     return res.status(409).json({ message: "Material já existe (mesmo nome)." });
   }
 }
+
 
 // DELETE /api/materials/:id  (soft delete -> desativa)
 async function deleteMaterial(req, res) {

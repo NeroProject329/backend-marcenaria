@@ -154,10 +154,10 @@ model Service {
 }
 
 model Client {
-  id        String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // nome principal (pode ser "Nome completo")
-  name      String
+  name String
 
   // ✅ novos (cadastro completo)
   cpf       String?
@@ -182,19 +182,19 @@ model Client {
   salonId String
   salon   Salon  @relation(fields: [salonId], references: [id])
 
-  appointments Appointment[]
-  orders       Order[]
-  payables     Payable[]
-  costs        Cost[]
-  budgets      Budget[]
-  materialMovements MaterialMovement[] @relation("MaterialMovementSupplier")
+  appointments      Appointment[]
+  orders            Order[]
+  payables          Payable[]
+  costs             Cost[]
+  budgets           Budget[]
+  materialMovements MaterialMovement[]      @relation("MaterialMovementSupplier")
+  materialPrices    MaterialSupplierPrice[]
 
   @@index([salonId, type])
   @@index([salonId, name])
   @@index([cpf])
   @@index([email])
 }
-
 
 model Appointment {
   id        String   @id @default(cuid())
@@ -597,6 +597,7 @@ model Material {
 
   movements           MaterialMovement[]
   budgetItemMaterials BudgetItemMaterial[]
+  supplierPrices      MaterialSupplierPrice[]
 
   @@unique([salonId, name])
   @@index([salonId, isActive])
@@ -638,4 +639,22 @@ model MaterialMovement {
   @@index([orderId])
   @@index([supplierId])
   @@index([nfNumber])
+}
+
+model MaterialSupplierPrice {
+  id String @id @default(cuid())
+
+  materialId String
+  material   Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+
+  supplierId String
+  supplier   Client @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  unitCostCents Int
+
+  createdAt DateTime @default(now())
+
+  @@unique([materialId, supplierId])
+  @@index([supplierId])
+  @@index([materialId])
 }
