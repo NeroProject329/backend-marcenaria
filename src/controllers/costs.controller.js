@@ -35,15 +35,21 @@ function monthRange(monthStr) {
 
 function monthKeyFromDate(d) {
   const dt = new Date(d);
-  const y = dt.getUTCFullYear();
-  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(dt);
+
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  return `${year}-${month}`;
 }
 
 function monthStartUTC(monthStr) {
   const range = monthRange(monthStr);
   if (!range) return null;
-  return range.from; // primeiro dia do mês UTC
+  return new Date(`${monthStr}-01T00:00:00-03:00`);
 }
 
 /**
