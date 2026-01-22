@@ -10,17 +10,6 @@ function toInt(v, field) {
   return { ok: true, value: n };
 }
 
-function monthRange(monthStr) {
-  const [y, m] = String(monthStr || "").split("-").map(Number);
-  if (!y || !m || m < 1 || m > 12) return null;
-
-  // UTC pra evitar “pular dia” por timezone
-  const from = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0));
-  const to = new Date(Date.UTC(y, m, 1, 0, 0, 0));
-  return { from, to };
-}
-
-
 function toDate(v, field) {
   const d = new Date(v);
   if (!v || Number.isNaN(d.getTime())) {
@@ -35,10 +24,117 @@ function normalizeType(v) {
   return VALID_TYPES.has(t) ? t : null;
 }
 
-// GET /api/costs?type=&from=&to=&supplierId=
+function monthRange(monthStr) {
+  const [y, m] = String(monthStr || "").split("-").map(Number);
+  if (!y || !m || m < 1 || m > 12) return null;
+
+  const from = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0));
+  const to = new Date(Date.UTC(y, m, 1, 0, 0, 0));
+  return { from, to };
+}
+
+function monthKeyFromDate(d) {
+  const dt = new Date(d);
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function monthStartUTC(monthStr) {
+  const range = monthRange(monthStr);
+  if (!range) return null;
+  return range.from; // primeiro dia do mês UTC
+}
+
+/**
+ * ✅ Garante que TODOS custos recorrentes tenham um registro no month (YYYY-MM).
+ * Regra:
+ * - Para cada recurringGroupId, se não existir Cost no month, cria copiando o último valor conhecido (<= month).
+ * - Edição em um mês só muda aquele mês. Meses futuros usam o “último conhecido” quando forem gerados.
+ */
+async function ensureRecurringMonth(salonId, month) {
+  if (!monthRange(month)) return;
+
+  const monthStart = monthStartUTC(month);
+  if (!monthStart) return;
+
+  await prisma.$transaction(async (tx) => {
+    // 1) Pega todos os custos recorrentes “historicamente” até o mês alvo
+    const recurringHistory = await tx.cost.findMany({
+      where: {
+        salonId,
+        isRecurring: true,
+        recurringGroupId: { not: null },
+        yearMonth: { lte: month },
+      },
+      orderBy: [{ yearMonth: "desc" }, { createdAt: "desc" }],
+      select: {
+        id: true,
+        recurringGroupId: true,
+        yearMonth: true,
+        type: true,
+        name: true,
+        description: true,
+        category: true,
+        amountCents: true,
+        supplierId: true,
+      },
+    });
+
+    // 2) Descobre o “último custo conhecido” de cada grupo
+    const lastByGroup = new Map();
+    for (const c of recurringHistory) {
+      const g = c.recurringGroupId;
+      if (!g) continue;
+      if (!lastByGroup.has(g)) lastByGroup.set(g, c); // como tá orderBy desc, o primeiro é o mais recente
+    }
+    const groups = Array.from(lastByGroup.keys());
+    if (!groups.length) return;
+
+    // 3) Quais desses grupos já têm registro no mês?
+    const existingThisMonth = await tx.cost.findMany({
+      where: {
+        salonId,
+        yearMonth: month,
+        recurringGroupId: { in: groups },
+      },
+      select: { recurringGroupId: true },
+    });
+    const hasSet = new Set(existingThisMonth.map((x) => x.recurringGroupId));
+
+    // 4) Cria os que faltam
+    const toCreate = [];
+    for (const g of groups) {
+      if (hasSet.has(g)) continue;
+
+      const base = lastByGroup.get(g);
+      if (!base) continue;
+
+      toCreate.push({
+        salonId,
+        type: base.type,
+        name: base.name,
+        description: base.description,
+        category: base.category,
+        isRecurring: true,
+        recurringGroupId: g,
+        yearMonth: month,
+        amountCents: base.amountCents,
+        occurredAt: monthStart,
+        supplierId: base.supplierId || null,
+      });
+    }
+
+    if (toCreate.length) {
+      await tx.cost.createMany({ data: toCreate });
+    }
+  });
+}
+
+// GET /api/costs?month=YYYY-MM&type=&supplierId=
 async function listCosts(req, res) {
   const { salonId } = req.user;
-  const { type, from, to, supplierId } = req.query;
+  const { type, supplierId, month } = req.query;
 
   const where = { salonId };
 
@@ -50,28 +146,29 @@ async function listCosts(req, res) {
 
   if (supplierId) where.supplierId = supplierId;
 
-  if (from || to) {
-    where.occurredAt = {};
-    if (from) {
-      const d = toDate(from, "from");
-      if (!d.ok) return res.status(400).json({ message: d.message });
-      where.occurredAt.gte = d.value;
-    }
-    if (to) {
-      const d = toDate(to, "to");
-      if (!d.ok) return res.status(400).json({ message: d.message });
-      where.occurredAt.lte = d.value;
-    }
+  // ✅ Agora a listagem é mensal
+  if (month) {
+    const m = String(month).trim();
+    if (!monthRange(m)) return res.status(400).json({ message: "month inválido. Use YYYY-MM" });
+
+    // garante recorrentes no mês
+    await ensureRecurringMonth(salonId, m);
+
+    where.yearMonth = m;
   }
 
   const costs = await prisma.cost.findMany({
     where,
-    orderBy: { occurredAt: "desc" },
+    orderBy: [{ yearMonth: "desc" }, { occurredAt: "desc" }],
     select: {
       id: true,
       name: true,
       description: true,
       type: true,
+      category: true,
+      isRecurring: true,
+      recurringGroupId: true,
+      yearMonth: true,
       amountCents: true,
       occurredAt: true,
       createdAt: true,
@@ -94,6 +191,10 @@ async function getCost(req, res) {
       name: true,
       description: true,
       type: true,
+      category: true,
+      isRecurring: true,
+      recurringGroupId: true,
+      yearMonth: true,
       amountCents: true,
       occurredAt: true,
       createdAt: true,
@@ -107,10 +208,18 @@ async function getCost(req, res) {
 }
 
 // POST /api/costs
-// body: { name, type, amountCents, occurredAt, description?, supplierId? }
 async function createCost(req, res) {
   const { salonId } = req.user;
-  const { name, type, amountCents, occurredAt, description, supplierId } = req.body;
+  const {
+    name,
+    type,
+    amountCents,
+    occurredAt,
+    description,
+    supplierId,
+    category,
+    isRecurring,
+  } = req.body;
 
   if (!name || String(name).trim().length < 2) {
     return res.status(400).json({ message: "name é obrigatório." });
@@ -124,14 +233,15 @@ async function createCost(req, res) {
     return res.status(400).json({ message: "amountCents inválido." });
   }
 
-  // ✅ occurredAt opcional: se não vier, usa hoje
-let occDate = new Date();
-if (occurredAt !== undefined && occurredAt !== null && occurredAt !== "") {
-  const occ = toDate(occurredAt, "occurredAt");
-  if (!occ.ok) return res.status(400).json({ message: occ.message });
-  occDate = occ.value;
-}
+  // occurredAt opcional
+  let occDate = new Date();
+  if (occurredAt !== undefined && occurredAt !== null && occurredAt !== "") {
+    const occ = toDate(occurredAt, "occurredAt");
+    if (!occ.ok) return res.status(400).json({ message: occ.message });
+    occDate = occ.value;
+  }
 
+  const ym = monthKeyFromDate(occDate);
 
   if (supplierId) {
     const supplier = await prisma.client.findFirst({
@@ -144,6 +254,11 @@ if (occurredAt !== undefined && occurredAt !== null && occurredAt !== "") {
     }
   }
 
+  const recurring = !!isRecurring;
+
+  // ✅ se é recorrente, cria um grupo próprio
+  const recurringGroupId = recurring ? `rec_${Date.now()}_${Math.random().toString(16).slice(2)}` : null;
+
   const cost = await prisma.cost.create({
     data: {
       salonId,
@@ -151,13 +266,23 @@ if (occurredAt !== undefined && occurredAt !== null && occurredAt !== "") {
       type: t,
       amountCents: amt.value,
       occurredAt: occDate,
+      yearMonth: ym,
+
       description: description ? String(description).trim() : null,
+      category: category ? String(category).trim() : null,
+      isRecurring: recurring,
+      recurringGroupId,
+
       supplierId: supplierId || null,
     },
     select: {
       id: true,
       name: true,
       type: true,
+      category: true,
+      isRecurring: true,
+      recurringGroupId: true,
+      yearMonth: true,
       amountCents: true,
       occurredAt: true,
       supplier: { select: { id: true, name: true, type: true } },
@@ -171,7 +296,16 @@ if (occurredAt !== undefined && occurredAt !== null && occurredAt !== "") {
 async function updateCost(req, res) {
   const { salonId } = req.user;
   const { id } = req.params;
-  const { name, type, amountCents, occurredAt, description, supplierId } = req.body;
+  const {
+    name,
+    type,
+    amountCents,
+    occurredAt,
+    description,
+    supplierId,
+    category,
+    isRecurring,
+  } = req.body;
 
   const exists = await prisma.cost.findFirst({
     where: { id, salonId },
@@ -206,10 +340,20 @@ async function updateCost(req, res) {
     const occ = toDate(occurredAt, "occurredAt");
     if (!occ.ok) return res.status(400).json({ message: occ.message });
     data.occurredAt = occ.value;
+    data.yearMonth = monthKeyFromDate(occ.value);
   }
 
   if (description !== undefined) {
     data.description = description ? String(description).trim() : null;
+  }
+
+  if (category !== undefined) {
+    data.category = category ? String(category).trim() : null;
+  }
+
+  if (isRecurring !== undefined) {
+    data.isRecurring = !!isRecurring;
+    // não mexe em recurringGroupId aqui (pra não quebrar séries antigas)
   }
 
   if (supplierId !== undefined) {
@@ -235,6 +379,10 @@ async function updateCost(req, res) {
       id: true,
       name: true,
       type: true,
+      category: true,
+      isRecurring: true,
+      recurringGroupId: true,
+      yearMonth: true,
       amountCents: true,
       occurredAt: true,
       supplier: { select: { id: true, name: true, type: true } },
@@ -259,12 +407,12 @@ async function deleteCost(req, res) {
   return res.json({ ok: true });
 }
 
+// GET /api/costs/summary?month=YYYY-MM&workDays=22
 async function costSummary(req, res) {
   const { salonId } = req.user;
 
   const month = String(req.query.month || "").trim();
-  const range = monthRange(month);
-  if (!range) {
+  if (!monthRange(month)) {
     return res.status(400).json({ message: "month inválido. Use YYYY-MM" });
   }
 
@@ -274,11 +422,13 @@ async function costSummary(req, res) {
     return res.status(400).json({ message: "workDays inválido (inteiro > 0)." });
   }
 
-  // busca custos do mês
+  // ✅ garante recorrentes no mês antes de somar
+  await ensureRecurringMonth(salonId, month);
+
   const costs = await prisma.cost.findMany({
     where: {
       salonId,
-      occurredAt: { gte: range.from, lt: range.to },
+      yearMonth: month,
     },
     select: { type: true, amountCents: true },
   });
@@ -292,22 +442,14 @@ async function costSummary(req, res) {
     .reduce((a, c) => a + (c.amountCents || 0), 0);
 
   const totalCents = fixedCents + variableCents;
-
-  // custo diário (arredonda para inteiro em centavos)
   const dailyCents = Math.round(totalCents / workDays);
 
   return res.json({
     month,
     workDays,
-    totals: {
-      fixedCents,
-      variableCents,
-      totalCents,
-      dailyCents,
-    },
+    totals: { fixedCents, variableCents, totalCents, dailyCents },
   });
 }
-
 
 module.exports = {
   listCosts,
@@ -315,5 +457,5 @@ module.exports = {
   createCost,
   updateCost,
   deleteCost,
-  costSummary, // ✅ novo
+  costSummary,
 };
