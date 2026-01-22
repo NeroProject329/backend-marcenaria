@@ -240,9 +240,10 @@ async function listMovements(req, res) {
       occurredAt: { gte: range.start, lt: range.end },
     },
     orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
-    include: {
-      material: { select: { id: true, name: true, unit: true } },
-    },
+   include: {
+  material: { select: { id: true, name: true, unit: true } },
+  supplier: { select: { id: true, name: true, phone: true, type: true } },
+},
   });
 
   return res.json({ movements });
@@ -252,7 +253,8 @@ async function listMovements(req, res) {
 async function createMovement(req, res) {
   const { salonId } = req.user;
 
-  const { materialId, type, source, qty, unitCostCents, occurredAt, notes, orderId } = req.body || {};
+  const {materialId, type, source, qty, unitCostCents, occurredAt, notes, orderId, supplierId, nfNumber} = req.body || {};
+
 
   if (!materialId) return res.status(400).json({ message: "materialId é obrigatório." });
 
@@ -264,6 +266,36 @@ async function createMovement(req, res) {
 
   const typeNorm = normalizeMovementType(type);
   if (!typeNorm) return res.status(400).json({ message: "type inválido (IN, OUT, ADJUST)." });
+
+  let supplierIdFinal = null;
+let nfNumberFinal = null;
+
+if (typeNorm === "IN") {
+  // fornecedor obrigatório (como seu front já valida)
+  if (!supplierId) {
+    return res.status(400).json({ message: "supplierId é obrigatório para Entrada (IN)." });
+  }
+
+  const supplier = await prisma.client.findFirst({
+    where: { id: supplierId, salonId },
+    select: { id: true, type: true },
+  });
+
+  if (!supplier) return res.status(404).json({ message: "Fornecedor não encontrado." });
+
+  const t = String(supplier.type || "").toUpperCase();
+  if (t !== "FORNECEDOR" && t !== "BOTH") {
+    return res.status(400).json({ message: "Cliente selecionado não é FORNECEDOR/BOTH." });
+  }
+
+  supplierIdFinal = supplierId;
+  nfNumberFinal = nfNumber ? String(nfNumber).trim().slice(0, 50) : null;
+} else {
+  // OUT/ADJUST não guarda fornecedor/NF
+  supplierIdFinal = null;
+  nfNumberFinal = null;
+}
+
 
   const sourceNorm = normalizeMovementSource(source) || "MANUAL";
   if (source !== undefined && sourceNorm === null) return res.status(400).json({ message: "source inválido." });
@@ -280,21 +312,26 @@ async function createMovement(req, res) {
   if (Number.isNaN(occ.getTime())) return res.status(400).json({ message: "occurredAt inválido (use ISO date)." });
 
   const created = await prisma.materialMovement.create({
-    data: {
-      salonId,
-      materialId,
-      type: typeNorm,
-      source: sourceNorm,
-      qty: q.value,
-      unitCostCents: cost.value,
-      occurredAt: occ,
-      notes: notes ? String(notes).trim() : null,
-      orderId: orderId || null,
-    },
-    include: {
-      material: { select: { id: true, name: true, unit: true } },
-    },
-  });
+  data: {
+    salonId,
+    materialId,
+    type: typeNorm,
+    source: sourceNorm,
+    qty: q.value,
+    unitCostCents: cost.value,
+    occurredAt: occ,
+    notes: notes ? String(notes).trim() : null,
+    orderId: orderId || null,
+
+    supplierId: supplierIdFinal,
+    nfNumber: nfNumberFinal,
+  },
+  include: {
+    material: { select: { id: true, name: true, unit: true } },
+    supplier: { select: { id: true, name: true, phone: true, type: true } },
+  },
+});
+
 
   return res.status(201).json({ movement: created });
 }
