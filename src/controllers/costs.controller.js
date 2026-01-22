@@ -307,10 +307,10 @@ async function updateCost(req, res) {
     isRecurring,
   } = req.body;
 
-  const exists = await prisma.cost.findFirst({
-    where: { id, salonId },
-    select: { id: true },
-  });
+ const exists = await prisma.cost.findFirst({
+  where: { id, salonId },
+  select: { id: true, recurringGroupId: true, isRecurring: true, yearMonth: true },
+});
   if (!exists) return res.status(404).json({ message: "Custo não encontrado." });
 
   const data = {};
@@ -351,10 +351,22 @@ async function updateCost(req, res) {
     data.category = category ? String(category).trim() : null;
   }
 
-  if (isRecurring !== undefined) {
-    data.isRecurring = !!isRecurring;
-    // não mexe em recurringGroupId aqui (pra não quebrar séries antigas)
+if (isRecurring !== undefined) {
+  const nextRecurring = !!isRecurring;
+  data.isRecurring = nextRecurring;
+
+  // ✅ se marcou como recorrente e ainda não tem grupo, cria um
+  if (nextRecurring && !exists.recurringGroupId) {
+    data.recurringGroupId = `rec_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   }
+
+  // ✅ se desmarcou recorrente, solta do grupo (opcional)
+  // se preferir manter o histórico do grupo, comente essas 2 linhas:
+  if (!nextRecurring) {
+    data.recurringGroupId = null;
+  }
+}
+
 
   if (supplierId !== undefined) {
     if (!supplierId) {
