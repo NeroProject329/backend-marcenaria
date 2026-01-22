@@ -4,6 +4,27 @@ function cleanPhone(v) {
   return String(v || "").replace(/\D/g, "");
 }
 
+function cleanText(v) {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
+}
+
+function cleanCPF(v) {
+  const d = String(v || "").replace(/\D/g, "");
+  return d ? d : null;
+}
+
+function cleanEmail(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s ? s : null;
+}
+
+function cleanCEP(v) {
+  const d = String(v || "").replace(/\D/g, "");
+  return d ? d : null;
+}
+
+
 const VALID_CLIENT_TYPES = new Set(["CLIENTE", "FORNECEDOR", "BOTH"]);
 
 function normalizeClientType(v) {
@@ -27,25 +48,39 @@ async function listClients(req, res) {
   if (typeParam) where.type = typeParam;
 
   if (q) {
-    where.OR = [
-      { name: { contains: q, mode: "insensitive" } },
-      { phone: { contains: cleanPhone(q) } },
-      { instagram: { contains: q, mode: "insensitive" } },
-    ];
+  where.OR = [
+    { name: { contains: q, mode: "insensitive" } },
+    { phone: { contains: cleanPhone(q) } },
+    { instagram: { contains: q, mode: "insensitive" } },
+    { cpf: { contains: cleanCPF(q) || q } },
+    { email: { contains: q.toLowerCase(), mode: "insensitive" } },
+  ];
   }
 
   const clients = await prisma.client.findMany({
     where,
     orderBy: { createdAt: "desc" },
     select: {
-      id: true,
-      name: true,
-      phone: true,
-      instagram: true,
-      notes: true,
-      type: true,       // ✅ novo
-      createdAt: true,
-    },
+  id: true,
+  name: true,
+  phone: true,
+  cpf: true,
+  email: true,
+
+  instagram: true,
+  notes: true,
+  type: true,
+
+  cep: true,
+  logradouro: true,
+  numero: true,
+  complemento: true,
+  bairro: true,
+  cidade: true,
+  estado: true,
+
+  createdAt: true,
+},
   });
 
   return res.json({ clients });
@@ -53,7 +88,8 @@ async function listClients(req, res) {
 
 async function createClient(req, res) {
   const { salonId } = req.user;
-  const { name, phone, instagram, notes, type } = req.body;
+  const {name, phone, instagram, notes, type,cpf, email,cep, logradouro, numero, complemento, bairro, cidade, estado,} = req.body;
+
 
   if (!name || String(name).trim().length < 2) {
     return res.status(400).json({ message: "Nome do cliente é obrigatório." });
@@ -83,8 +119,19 @@ async function createClient(req, res) {
       name: String(name).trim(),
       phone: phoneClean,
       instagram: instagram ? String(instagram).trim() : null,
+      cpf: cleanCPF(cpf),
+      email: cleanEmail(email),
+      cep: cleanCEP(cep),
+      logradouro: cleanText(logradouro),
+      numero: cleanText(numero),
+      complemento: cleanText(complemento),
+      bairro: cleanText(bairro),
+      cidade: cleanText(cidade),
+      estado: cleanText(estado),
+
       notes: notes ? String(notes).trim() : null,
       salonId,
+      
       ...(typeNorm ? { type: typeNorm } : {}), // ✅ se não vier, Prisma usa default CLIENTE
     },
     select: {
@@ -111,7 +158,8 @@ async function updateClient(req, res) {
   });
   if (!exists) return res.status(404).json({ message: "Cliente não encontrado." });
 
-  const { name, phone, instagram, notes, type } = req.body;
+  const {name, phone, instagram, notes, type,cpf, email,cep, logradouro, numero, complemento, bairro, cidade, estado,} = req.body;
+
 
   const data = {};
 
@@ -140,6 +188,17 @@ async function updateClient(req, res) {
 
   if (instagram !== undefined) data.instagram = instagram ? String(instagram).trim() : null;
   if (notes !== undefined) data.notes = notes ? String(notes).trim() : null;
+  if (cpf !== undefined) data.cpf = cleanCPF(cpf);
+  if (email !== undefined) data.email = cleanEmail(email);
+
+  if (cep !== undefined) data.cep = cleanCEP(cep);
+  if (logradouro !== undefined) data.logradouro = cleanText(logradouro);
+  if (numero !== undefined) data.numero = cleanText(numero);
+  if (complemento !== undefined) data.complemento = cleanText(complemento);
+  if (bairro !== undefined) data.bairro = cleanText(bairro);
+  if (cidade !== undefined) data.cidade = cleanText(cidade);
+  if (estado !== undefined) data.estado = cleanText(estado);
+
 
   if (type !== undefined) {
     const typeNorm = normalizeClientType(type);

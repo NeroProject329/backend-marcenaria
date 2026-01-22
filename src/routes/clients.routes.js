@@ -13,7 +13,7 @@ router.use(requireAuth);
 router.get("/metrics", listClientsWithMetrics);
 
 router.get("/", listClients);
-router.post("/", requireAuth, checkLimit("clients"), createClient);
+router.post("/", checkLimit("clients"), createClient);
 router.patch("/:id", updateClient);
 router.delete("/:id", deleteClient);
 
