@@ -1,5 +1,23 @@
 const { prisma } = require("../lib/prisma");
 
+
+// --------------------
+// HELPERS
+// --------------------
+
+const UI_TO_DB_TYPE = (t) => {
+  const v = String(t || "").toUpperCase();
+  if (v === "IN" || v === "INCOME") return "INCOME";
+  if (v === "OUT" || v === "EXPENSE") return "EXPENSE";
+  return null;
+};
+
+const DB_TO_UI_TYPE = (t) => {
+  const v = String(t || "").toUpperCase();
+  return v === "INCOME" ? "IN" : "OUT";
+};
+
+
 function parseISO(v) {
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d;
@@ -99,8 +117,9 @@ async function calcFlow({ salonId, from, to }) {
     select: { type: true, amount: true },
   });
 
-  const manualIn = tx.filter((t) => t.type === "IN").reduce((a, t) => a + (t.amount || 0), 0);
-  const manualOut = tx.filter((t) => t.type === "OUT").reduce((a, t) => a + (t.amount || 0), 0);
+  const manualIn = tx.filter((t) => UI_TO_DB_TYPE(t.type) === "INCOME").reduce((a, t) => a + (t.amount || 0), 0);
+  const manualOut = tx.filter((t) => UI_TO_DB_TYPE(t.type) === "EXPENSE").reduce((a, t) => a + (t.amount || 0), 0);
+
 
 
   const inCents = autoIn + manualIn;
@@ -148,8 +167,9 @@ async function sumManualTx({ salonId, from, to }) {
     select: { type: true, amount: true },
   });
 
-  const manualIn = tx.filter((t) => t.type === "IN").reduce((a, t) => a + (t.amount || 0), 0);
-  const manualOut = tx.filter((t) => t.type === "OUT").reduce((a, t) => a + (t.amount || 0), 0);
+  const manualIn = tx.filter((t) => UI_TO_DB_TYPE(t.type) === "INCOME").reduce((a, t) => a + (t.amount || 0), 0);
+  const manualOut = tx.filter((t) => UI_TO_DB_TYPE(t.type) === "EXPENSE").reduce((a, t) => a + (t.amount || 0), 0);
+
 
 
   return { manualIn, manualOut };
@@ -323,34 +343,55 @@ async function payablesByMonth(req, res) {
   const range = monthRange(month);
   if (!range) return res.status(400).json({ message: "month inválido. Use YYYY-MM" });
 
-  const rows = await prisma.payableInstallment.findMany({
-    where: {
-      payable: { salonId },
-      dueDate: { gte: range.from, lt: range.to },
-    },
-    orderBy: [{ dueDate: "asc" }, { number: "asc" }],
-    select: {
-      id: true,
-      number: true,
-      dueDate: true,
-      amountCents: true,
-      status: true,
-      paidAt: true,
-      method: true,
-      payable: {
-        select: {
-          id: true,
-          description: true,
-          supplier: { select: { id: true, name: true, phone: true } },
-        },
+  const [installments, costs] = await Promise.all([
+    prisma.payableInstallment.findMany({
+      where: { payable: { salonId }, dueDate: { gte: range.from, lt: range.to } },
+      orderBy: [{ dueDate: "asc" }, { number: "asc" }],
+      select: {
+        id: true, number: true, dueDate: true, amountCents: true, status: true, paidAt: true, method: true,
+        payable: { select: { id: true, description: true, supplier: { select: { id: true, name: true, phone: true } } } },
       },
-    },
-  });
+    }),
+    prisma.cost.findMany({
+      where: { salonId, occurredAt: { gte: range.from, lt: range.to } },
+      orderBy: { occurredAt: "asc" },
+      select: { id: true, name: true, amountCents: true, occurredAt: true, type: true, supplier: { select: { id: true, name: true, phone: true } } },
+    })
+  ]);
 
-  const totalExpectedCents = rows.reduce((a, r) => a + (r.amountCents || 0), 0);
-  const totalPaidCents = rows
-    .filter((r) => r.status === "PAGO")
-    .reduce((a, r) => a + (r.amountCents || 0), 0);
+  const mappedInstallments = installments.map((r) => ({
+    id: r.id,
+    number: r.number,
+    dueDate: r.dueDate,
+    amountCents: r.amountCents,
+    status: r.status,
+    paidAt: r.paidAt,
+    method: r.method,
+    payableId: r.payable?.id || null,
+    description: r.payable?.description || null,
+    supplier: r.payable?.supplier || null,
+    source: "PAYABLE",
+  }));
+
+  const mappedCosts = costs.map((c) => ({
+    id: c.id,
+    number: null,
+    dueDate: c.occurredAt,          // custo “vence” na data que ocorreu (ou você pode ter um dueDate futuro se quiser evoluir depois)
+    amountCents: c.amountCents,
+    status: "PAGO",
+    paidAt: c.occurredAt,
+    method: null,
+    payableId: null,
+    description: c.name,
+    supplier: c.supplier || null,
+    source: "COST",
+  }));
+
+  const items = [...mappedInstallments, ...mappedCosts]
+    .sort((a,b) => new Date(a.dueDate) - new Date(b.dueDate));
+
+  const totalExpectedCents = items.reduce((a, r) => a + (r.amountCents || 0), 0);
+  const totalPaidCents = items.filter((r) => r.status === "PAGO").reduce((a, r) => a + (r.amountCents || 0), 0);
 
   return res.json({
     month,
@@ -359,20 +400,11 @@ async function payablesByMonth(req, res) {
       paidCents: totalPaidCents,
       openCents: Math.max(0, totalExpectedCents - totalPaidCents),
     },
-    installments: rows.map((r) => ({
-      id: r.id,
-      number: r.number,
-      dueDate: r.dueDate,
-      amountCents: r.amountCents,
-      status: r.status,
-      paidAt: r.paidAt,
-      method: r.method,
-      payableId: r.payable?.id || null,
-      description: r.payable?.description || null,
-      supplier: r.payable?.supplier || null,
-    })),
+    installments: items,
   });
 }
+
+
 
 
 // --------------------
@@ -388,7 +420,9 @@ async function listCategories(req, res) {
     select: { id: true, name: true, type: true, createdAt: true },
   });
 
-  return res.json({ categories });
+  return res.json({
+  categories: categories.map(c => ({ ...c, type: DB_TO_UI_TYPE(c.type) })),
+});
 }
 
 // POST /api/finance/categories
@@ -400,22 +434,27 @@ async function createCategory(req, res) {
     return res.status(400).json({ message: "Nome da categoria é obrigatório." });
   }
 
-  // type opcional: IN | OUT
-  const t = type ? String(type).toUpperCase() : null;
-  if (t && t !== "IN" && t !== "OUT") {
-    return res.status(400).json({ message: "Tipo de categoria inválido (IN/OUT)." });
+  const tUI = String(type || "").toUpperCase();
+  if (tUI !== "IN" && tUI !== "OUT") {
+    return res.status(400).json({ message: "Tipo obrigatório (IN/OUT)." });
   }
+
+  const tDB = UI_TO_DB_TYPE(tUI);
 
   try {
     const category = await prisma.cashCategory.create({
-      data: { salonId, name: String(name).trim(), type: t || null },
+      data: { salonId, name: String(name).trim(), type: tDB },
       select: { id: true, name: true, type: true, createdAt: true },
     });
-    return res.status(201).json({ category });
+
+    return res.status(201).json({
+      category: { ...category, type: DB_TO_UI_TYPE(category.type) },
+    });
   } catch {
-    return res.status(409).json({ message: "Já existe uma categoria com esse nome." });
+    return res.status(409).json({ message: "Já existe uma categoria com esse nome e tipo." });
   }
 }
+
 
 // --------------------
 // 4) TRANSACTIONS (manual IN/OUT)
@@ -439,7 +478,10 @@ async function listTransactions(req, res) {
     source: "MANUAL",
   };
 
-  if (type) where.type = type;
+  if (type) {const mapped = UI_TO_DB_TYPE(type);
+  if (!mapped) return res.status(400).json({ message: "type inválido (IN/OUT)" });
+  where.type = mapped;
+}
   if (categoryId) where.categoryId = categoryId;
 
   const transactions = await prisma.cashTransaction.findMany({
@@ -462,10 +504,12 @@ async function listTransactions(req, res) {
 
   const parsed = transactions.map(t => ({
   ...t,
+  type: DB_TO_UI_TYPE(t.type),
   name: t.description,
   amountCents: t.amount,
   notes: null,
 }));
+
 
 
   return res.json({ transactions: parsed });
@@ -474,12 +518,15 @@ async function listTransactions(req, res) {
 // POST /api/finance/transactions
 async function createTransaction(req, res) {
   const { salonId } = req.user;
-  const { type, name, occurredAt, amountCents, categoryId, notes } = req.body;
+  const { type, name, occurredAt, amountCents, categoryId } = req.body;
 
-  const t = String(type || "").toUpperCase();
-  if (t !== "IN" && t !== "OUT") return res.status(400).json({ message: "type inválido (IN/OUT)." });
+  
+  const tDB = UI_TO_DB_TYPE(type);
+  if (!tDB) return res.status(400).json({ message: "type inválido (IN/OUT)." });
 
-  if (!name || String(name).trim().length < 2) return res.status(400).json({ message: "Nome é obrigatório." });
+  if (!name || String(name).trim().length < 2) {
+    return res.status(400).json({ message: "Nome é obrigatório." });
+  }
 
   const dt = parseISO(occurredAt);
   if (!dt) return res.status(400).json({ message: "occurredAt inválido (use ISO)." });
@@ -489,46 +536,51 @@ async function createTransaction(req, res) {
     return res.status(400).json({ message: "amountCents inválido (inteiro > 0)." });
   }
 
-  // se categoria veio, valida se é do salão
   if (categoryId) {
-    const cat = await prisma.cashCategory.findFirst({ where: { id: categoryId, salonId }, select: { id: true, type: true } });
+    const cat = await prisma.cashCategory.findFirst({
+      where: { id: categoryId, salonId },
+      select: { id: true, type: true },
+    });
     if (!cat) return res.status(404).json({ message: "Categoria não encontrada." });
-    if (cat.type && cat.type !== t) return res.status(400).json({ message: "Categoria não compatível com o tipo (IN/OUT)." });
+
+    if (cat.type && cat.type !== tDB) {
+      return res.status(400).json({ message: "Categoria não compatível com o tipo (IN/OUT)." });
+    }
   }
 
   const transaction = await prisma.cashTransaction.create({
     data: {
-  salonId,
-  type: t,
-  source: "MANUAL",
-  description: String(name).trim(),
-  amount: cents,
-  occurredAt: dt,
-  categoryId: categoryId || null,
-},
-   select: {
-  id: true,
-  type: true,
-  source: true,
-  description: true,
-  occurredAt: true,
-  amount: true,
-  category: { select: { id: true, name: true } },
-  createdAt: true,
-},
+      salonId,
+      type: tDB,
+      source: "MANUAL",
+      description: String(name).trim(),
+      amount: cents,
+      occurredAt: dt,
+      categoryId: categoryId || null,
+    },
+    select: {
+      id: true,
+      type: true,
+      source: true,
+      description: true,
+      occurredAt: true,
+      amount: true,
+      category: { select: { id: true, name: true } },
+      createdAt: true,
+    },
   });
 
   return res.status(201).json({
-  transaction: {
-    ...transaction,
-    name: transaction.description,
-    amountCents: transaction.amount,
-    notes: null,
-  },
-});
-
-
+    transaction: {
+      ...transaction,
+      type: DB_TO_UI_TYPE(transaction.type),
+      name: transaction.description,
+      amountCents: transaction.amount,
+      notes: null,
+    },
+  });
 }
+
 
 // PATCH /api/finance/transactions/:id
 async function updateTransaction(req, res) {
@@ -576,7 +628,7 @@ async function updateTransaction(req, res) {
         select: { id: true, type: true },
       });
       if (!cat) return res.status(404).json({ message: "Categoria não encontrada." });
-      if (cat.type && cat.type !== exists.type) return res.status(400).json({ message: "Categoria não compatível com o tipo (IN/OUT)." });
+      if (cat.type && cat.type !== exists.type) return res.status(400).json({ message: "Categoria não compatível com o tipo da transação." });
       data.categoryId = categoryId;
     }
   }
@@ -597,9 +649,10 @@ select: {
 
   });
 
-  return res.json({
+ return res.json({
   transaction: {
     ...transaction,
+    type: DB_TO_UI_TYPE(transaction.type),
     name: transaction.description,
     amountCents: transaction.amount,
     notes: null,
