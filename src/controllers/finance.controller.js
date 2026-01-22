@@ -472,48 +472,164 @@ async function listTransactions(req, res) {
   const type = req.query.type ? String(req.query.type).toUpperCase() : null;
   const categoryId = req.query.categoryId ? String(req.query.categoryId) : null;
 
+  // ✅ novo: ALL
+  const include = String(req.query.include || "").toLowerCase(); // "all" ou ""
+
+  // --------------------
+  // 1) MANUAL (sempre)
+  // --------------------
   const where = {
     salonId,
     occurredAt: { gte: from, lt: to },
     source: "MANUAL",
   };
 
-  if (type) {const mapped = UI_TO_DB_TYPE(type);
-  if (!mapped) return res.status(400).json({ message: "type inválido (IN/OUT)" });
-  where.type = mapped;
-}
+  // filtro tipo (IN/OUT) -> DB (INCOME/EXPENSE)
+  if (type) {
+    const mapped = UI_TO_DB_TYPE(type);
+    if (!mapped) return res.status(400).json({ message: "type inválido (IN/OUT)" });
+    where.type = mapped;
+  }
   if (categoryId) where.categoryId = categoryId;
 
   const transactions = await prisma.cashTransaction.findMany({
     where,
     orderBy: { occurredAt: "desc" },
     select: {
-  id: true,
-  type: true,
-  source: true,
-  description: true,
-  occurredAt: true,
-  amount: true,
-  category: {
-    select: { id: true, name: true }
-  },
-  createdAt: true,
-}
-,
+      id: true,
+      type: true,
+      source: true,
+      description: true,
+      occurredAt: true,
+      amount: true,
+      category: { select: { id: true, name: true } },
+      createdAt: true,
+    },
   });
 
-  const parsed = transactions.map(t => ({
-  ...t,
-  type: DB_TO_UI_TYPE(t.type),
-  name: t.description,
-  amountCents: t.amount,
-  notes: null,
-}));
+  const parsedManual = transactions.map((t) => ({
+    id: t.id,
+    source: "MANUAL",
+    type: DB_TO_UI_TYPE(t.type), // IN/OUT
+    name: t.description,
+    category: t.category || null,
+    occurredAt: t.occurredAt,
+    amountCents: t.amount,
+    notes: null,
+  }));
 
+  // --------------------
+  // 2) Se não for ALL, devolve só MANUAL (como já é hoje)
+  // --------------------
+  if (include !== "all") {
+    return res.json({ transactions: parsedManual });
+  }
 
+  // --------------------
+  // 3) ALL = junta tudo que mexe no caixa no período
+  //    (custos + recebíveis pagos + pagáveis pagos + manual)
+  // --------------------
+  const [recvPaid, payPaid, costs] = await Promise.all([
+    prisma.receivableInstallment.findMany({
+      where: {
+        receivable: { salonId },
+        status: "PAGO",
+        paidAt: { gte: from, lt: to },
+      },
+      select: {
+        id: true,
+        paidAt: true,
+        amountCents: true,
+        receivable: {
+          select: {
+            order: {
+              select: {
+                id: true,
+                client: { select: { name: true } },
+              },
+            },
+          },
+        },
+      },
+    }),
 
-  return res.json({ transactions: parsed });
+    prisma.payableInstallment.findMany({
+      where: {
+        payable: { salonId },
+        status: "PAGO",
+        paidAt: { gte: from, lt: to },
+      },
+      select: {
+        id: true,
+        paidAt: true,
+        amountCents: true,
+        payable: {
+          select: {
+            description: true,
+            supplier: { select: { name: true } },
+          },
+        },
+      },
+    }),
+
+    prisma.cost.findMany({
+      where: { salonId, occurredAt: { gte: from, lt: to } },
+      select: {
+        id: true,
+        occurredAt: true,
+        amountCents: true,
+        name: true,
+        supplier: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const autoReceivables = recvPaid.map((r) => ({
+    id: r.id,
+    source: "RECEIVABLE",
+    type: "IN",
+    name: `Recebimento - ${r.receivable?.order?.client?.name || "-"}`,
+    category: null,
+    occurredAt: r.paidAt,
+    amountCents: r.amountCents,
+    notes: r.receivable?.order?.id ? `Pedido: ${r.receivable.order.id}` : null,
+  }));
+
+  const autoPayables = payPaid.map((p) => ({
+    id: p.id,
+    source: "PAYABLE",
+    type: "OUT",
+    name: p.payable?.description || "Pagamento",
+    category: null,
+    occurredAt: p.paidAt,
+    amountCents: p.amountCents,
+    notes: p.payable?.supplier?.name ? `Fornecedor: ${p.payable.supplier.name}` : null,
+  }));
+
+  const autoCosts = costs.map((c) => ({
+    id: c.id,
+    source: "COST",
+    type: "OUT",
+    name: c.name || "Custo",
+    category: null,
+    occurredAt: c.occurredAt,
+    amountCents: c.amountCents,
+    notes: c.supplier?.name ? `Fornecedor: ${c.supplier.name}` : null,
+  }));
+
+  // merge
+  let merged = [...parsedManual, ...autoReceivables, ...autoPayables, ...autoCosts];
+
+  // aplica filtros do front também no ALL:
+  if (type) merged = merged.filter((x) => x.type === type);
+  if (categoryId) merged = merged.filter((x) => x.category?.id === categoryId);
+
+  // ordem desc por data
+  merged.sort((a, b) => new Date(b.occurredAt) - new Date(a.occurredAt));
+
+  return res.json({ transactions: merged });
 }
+
 
 // POST /api/finance/transactions
 async function createTransaction(req, res) {
