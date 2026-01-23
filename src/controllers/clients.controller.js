@@ -332,7 +332,6 @@ async function listClientOrders(req, res) {
       paymentMode: true,
       paymentMethod: true,
       installmentsCount: true,
-      listClientOrders,
     },
   });
 
@@ -346,4 +345,5 @@ module.exports = {
   updateClient,
   deleteClient,
   listClientsWithMetrics,
+  listClientOrders,
 };
