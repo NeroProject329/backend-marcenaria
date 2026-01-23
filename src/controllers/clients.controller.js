@@ -320,20 +320,33 @@ async function listClientOrders(req, res) {
   });
   if (!client) return res.status(404).json({ message: "Cliente não encontrado." });
 
-  const orders = await prisma.order.findMany({
-    where: { salonId, clientId: id },
-    orderBy: [{ createdAt: "desc" }],
-    select: {
-      id: true,
-      status: true,
-      totalCents: true,
-      createdAt: true,
-      expectedDeliveryAt: true,
-      paymentMode: true,
-      paymentMethod: true,
-      installmentsCount: true,
+ const orders = await prisma.order.findMany({
+  where: { salonId, clientId: id },
+  orderBy: [{ createdAt: "desc" }],
+  select: {
+    id: true,
+    status: true,
+    totalCents: true,
+    createdAt: true,
+    expectedDeliveryAt: true,
+    paymentMode: true,
+    paymentMethod: true,
+    installmentsCount: true,
+
+    // ✅ NOVO: itens do pedido
+    items: {
+      select: {
+        id: true,
+        name: true,
+        quantity: true,
+        unitPriceCents: true,
+        totalCents: true,
+      },
+      orderBy: { createdAt: "asc" },
     },
-  });
+  },
+});
+
 
   return res.json({ client, orders });
 }
