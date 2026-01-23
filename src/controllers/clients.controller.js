@@ -308,6 +308,38 @@ async function listClientsWithMetrics(req, res) {
   return res.json({ clients: result });
 }
 
+// GET /api/clients/:id/orders
+async function listClientOrders(req, res) {
+  const { salonId } = req.user;
+  const { id } = req.params;
+
+  // valida cliente do salão
+  const client = await prisma.client.findFirst({
+    where: { id, salonId },
+    select: { id: true, name: true, type: true },
+  });
+  if (!client) return res.status(404).json({ message: "Cliente não encontrado." });
+
+  const orders = await prisma.order.findMany({
+    where: { salonId, clientId: id },
+    orderBy: [{ createdAt: "desc" }],
+    select: {
+      id: true,
+      status: true,
+      totalCents: true,
+      createdAt: true,
+      expectedDeliveryAt: true,
+      paymentMode: true,
+      paymentMethod: true,
+      installmentsCount: true,
+      listClientOrders,
+    },
+  });
+
+  return res.json({ client, orders });
+}
+
+
 module.exports = {
   listClients,
   createClient,
