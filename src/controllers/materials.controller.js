@@ -53,6 +53,14 @@ function normalizeMovementSource(v) {
   return allowed.has(s) ? s : null;
 }
 
+function monthKeyFromDate(d) {
+  const dt = new Date(d);
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+
 // --------------------
 // Materials (Catalog)
 // --------------------
@@ -391,17 +399,28 @@ async function listMovements(req, res) {
 }
 
 // POST /api/materials/movements
+// POST /api/materials/movements
 async function createMovement(req, res) {
   const { salonId } = req.user;
 
-  const {materialId, type, source, qty, unitCostCents, occurredAt, notes, orderId, supplierId, nfNumber} = req.body || {};
-
+  const {
+    materialId,
+    type,
+    source,
+    qty,
+    unitCostCents,
+    occurredAt,
+    notes,
+    orderId,
+    supplierId,
+    nfNumber,
+  } = req.body || {};
 
   if (!materialId) return res.status(400).json({ message: "materialId é obrigatório." });
 
   const mat = await prisma.material.findFirst({
     where: { id: materialId, salonId },
-    select: { id: true },
+    select: { id: true, name: true, unit: true }, // ✅ vamos usar name no custo
   });
   if (!mat) return res.status(404).json({ message: "Material não encontrado." });
 
@@ -409,34 +428,31 @@ async function createMovement(req, res) {
   if (!typeNorm) return res.status(400).json({ message: "type inválido (IN, OUT, ADJUST)." });
 
   let supplierIdFinal = null;
-let nfNumberFinal = null;
+  let nfNumberFinal = null;
 
-if (typeNorm === "IN") {
-  // fornecedor obrigatório (como seu front já valida)
-  if (!supplierId) {
-    return res.status(400).json({ message: "supplierId é obrigatório para Entrada (IN)." });
+  if (typeNorm === "IN") {
+    if (!supplierId) {
+      return res.status(400).json({ message: "supplierId é obrigatório para Entrada (IN)." });
+    }
+
+    const supplier = await prisma.client.findFirst({
+      where: { id: supplierId, salonId },
+      select: { id: true, type: true, name: true },
+    });
+
+    if (!supplier) return res.status(404).json({ message: "Fornecedor não encontrado." });
+
+    const t = String(supplier.type || "").toUpperCase();
+    if (t !== "FORNECEDOR" && t !== "BOTH") {
+      return res.status(400).json({ message: "Cliente selecionado não é FORNECEDOR/BOTH." });
+    }
+
+    supplierIdFinal = supplierId;
+    nfNumberFinal = nfNumber ? String(nfNumber).trim().slice(0, 50) : null;
+  } else {
+    supplierIdFinal = null;
+    nfNumberFinal = null;
   }
-
-  const supplier = await prisma.client.findFirst({
-    where: { id: supplierId, salonId },
-    select: { id: true, type: true },
-  });
-
-  if (!supplier) return res.status(404).json({ message: "Fornecedor não encontrado." });
-
-  const t = String(supplier.type || "").toUpperCase();
-  if (t !== "FORNECEDOR" && t !== "BOTH") {
-    return res.status(400).json({ message: "Cliente selecionado não é FORNECEDOR/BOTH." });
-  }
-
-  supplierIdFinal = supplierId;
-  nfNumberFinal = nfNumber ? String(nfNumber).trim().slice(0, 50) : null;
-} else {
-  // OUT/ADJUST não guarda fornecedor/NF
-  supplierIdFinal = null;
-  nfNumberFinal = null;
-}
-
 
   const sourceNorm = normalizeMovementSource(source) || "MANUAL";
   if (source !== undefined && sourceNorm === null) return res.status(400).json({ message: "source inválido." });
@@ -452,30 +468,72 @@ if (typeNorm === "IN") {
   const occ = occurredAt ? new Date(occurredAt) : new Date();
   if (Number.isNaN(occ.getTime())) return res.status(400).json({ message: "occurredAt inválido (use ISO date)." });
 
-  const created = await prisma.materialMovement.create({
-  data: {
-    salonId,
-    materialId,
-    type: typeNorm,
-    source: sourceNorm,
-    qty: q.value,
-    unitCostCents: cost.value,
-    occurredAt: occ,
-    notes: notes ? String(notes).trim() : null,
-    orderId: orderId || null,
+  const yearMonth = monthKeyFromDate(occ);
 
-    supplierId: supplierIdFinal,
-    nfNumber: nfNumberFinal,
-  },
-  include: {
-    material: { select: { id: true, name: true, unit: true } },
-    supplier: { select: { id: true, name: true, phone: true, type: true } },
-  },
-});
+  const created = await prisma.$transaction(async (tx) => {
+    // 1) cria movimentação
+    const mv = await tx.materialMovement.create({
+      data: {
+        salonId,
+        materialId,
+        type: typeNorm,
+        source: sourceNorm,
+        qty: q.value,
+        unitCostCents: cost.value,
+        occurredAt: occ,
+        notes: notes ? String(notes).trim() : null,
+        orderId: orderId || null,
 
+        supplierId: supplierIdFinal,
+        nfNumber: nfNumberFinal,
+      },
+      include: {
+        material: { select: { id: true, name: true, unit: true } },
+        supplier: { select: { id: true, name: true, phone: true, type: true } },
+      },
+    });
+
+    // 2) se for ENTRADA (compra), cria custo automático
+    if (mv.type === "IN") {
+      const totalCents = Math.round((Number(mv.qty) || 0) * (Number(mv.unitCostCents) || 0));
+
+      // ✅ descrição única pra evitar duplicação em reenvio/clique duplo
+      const descKey = `ESTOQUE_MOVEMENT:${mv.id}`;
+
+      const already = await tx.cost.findFirst({
+        where: { salonId, description: descKey },
+        select: { id: true },
+      });
+
+      if (!already) {
+        await tx.cost.create({
+          data: {
+            salonId,
+            type: "VARIAVEL",
+            name: mv.material?.name || "Compra de material",
+            category: "MATERIAIS",
+            amountCents: totalCents,
+            occurredAt: mv.occurredAt,
+            yearMonth,
+            supplierId: mv.supplierId || null,
+
+            // ✅ compra não é recorrente
+            isRecurring: false,
+            recurringGroupId: null,
+
+            // ✅ amarra custo ao movimento
+            description: descKey,
+          },
+        });
+      }
+    }
+
+    return mv;
+  });
 
   return res.status(201).json({ movement: created });
 }
+
 
 // GET /api/materials/stock
 async function materialsStock(req, res) {
