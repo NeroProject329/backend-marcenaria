@@ -376,26 +376,122 @@ async function deleteMaterial(req, res) {
 // Movements (Real control)
 // --------------------
 // GET /api/materials/movements?month=YYYY-MM
-async function listMovements(req, res) {
-  const { salonId } = req.user;
+export async function listMovements(req, res) {
+  try {
+    const salonId = req.salonId;
 
-  const month = String(req.query.month || "").trim();
-  const range = parseMonthRange(month);
-  if (!range) return res.status(400).json({ message: "month inválido (use YYYY-MM)." });
+    const {
+      month,              // modo antigo (lista do mês)
+      materialId,         // modo novo (histórico por produto)
+      type,               // IN | OUT | ADJUST
+      q,                  // busca (produto/fornecedor/nf/obs)
+      from,               // YYYY-MM-DD
+      to,                 // YYYY-MM-DD
+      limit = "50",
+      offset = "0",
+    } = req.query;
 
-  const movements = await prisma.materialMovement.findMany({
-    where: {
+    const take = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const skip = Math.max(parseInt(offset, 10) || 0, 0);
+
+    // ===========================
+    // ✅ MODO NOVO: histórico por material
+    // ===========================
+    if (materialId) {
+      const where = { salonId, materialId };
+
+      if (type && ["IN", "OUT", "ADJUST"].includes(type)) {
+        where.type = type;
+      }
+
+      if (from || to) {
+        where.occurredAt = {};
+        if (from) {
+          const d = new Date(from);
+          d.setHours(0, 0, 0, 0);
+          where.occurredAt.gte = d;
+        }
+        if (to) {
+          const d = new Date(to);
+          d.setHours(23, 59, 59, 999);
+          where.occurredAt.lte = d;
+        }
+      }
+
+      const total = await prisma.materialMovement.count({ where });
+
+      const movements = await prisma.materialMovement.findMany({
+        where,
+        include: { material: true, supplier: true },
+        orderBy: { occurredAt: "desc" },
+        skip,
+        take,
+      });
+
+      return res.json({ movements, total, limit: take, offset: skip });
+    }
+
+    // ===========================
+    // ✅ MODO ANTIGO: lista do mês (com filtros extras)
+    // ===========================
+    if (!month) {
+      return res.status(400).json({ error: "month é obrigatório (ex: 2026-01) quando materialId não for enviado." });
+    }
+
+    const { start, end } = parseMonthRange(month);
+
+    const where = {
       salonId,
-      occurredAt: { gte: range.start, lt: range.end },
-    },
-    orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
-   include: {
-  material: { select: { id: true, name: true, unit: true } },
-  supplier: { select: { id: true, name: true, phone: true, type: true } },
-},
-  });
+      occurredAt: { gte: start, lt: end },
+    };
 
-  return res.json({ movements });
+    if (type && ["IN", "OUT", "ADJUST"].includes(type)) {
+      where.type = type;
+    }
+
+    if (q && String(q).trim()) {
+      const query = String(q).trim();
+      where.OR = [
+        { material: { name: { contains: query, mode: "insensitive" } } },
+        { supplier: { name: { contains: query, mode: "insensitive" } } },
+        { nfNumber: { contains: query, mode: "insensitive" } },
+        { notes: { contains: query, mode: "insensitive" } },
+      ];
+    }
+
+    if (from || to) {
+      where.occurredAt = {};
+      if (from) {
+        const d = new Date(from);
+        d.setHours(0, 0, 0, 0);
+        where.occurredAt.gte = d;
+      } else {
+        where.occurredAt.gte = start;
+      }
+
+      if (to) {
+        const d = new Date(to);
+        d.setHours(23, 59, 59, 999);
+        where.occurredAt.lte = d;
+      } else {
+        // mantém o range do mês
+        const d = new Date(end);
+        d.setMilliseconds(d.getMilliseconds() - 1);
+        where.occurredAt.lte = d;
+      }
+    }
+
+    const movements = await prisma.materialMovement.findMany({
+      where,
+      include: { material: true, supplier: true },
+      orderBy: { occurredAt: "desc" },
+    });
+
+    return res.json({ movements });
+  } catch (err) {
+    console.error("listMovements error:", err);
+    return res.status(500).json({ error: "Erro ao listar movimentações." });
+  }
 }
 
 // POST /api/materials/movements
