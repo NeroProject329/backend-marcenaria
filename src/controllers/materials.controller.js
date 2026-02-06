@@ -376,7 +376,7 @@ async function deleteMaterial(req, res) {
 // Movements (Real control)
 // --------------------
 // GET /api/materials/movements?month=YYYY-MM
-export async function listMovements(req, res) {
+async function listMovements(req, res) {
   try {
     const salonId = req.salonId;
 
