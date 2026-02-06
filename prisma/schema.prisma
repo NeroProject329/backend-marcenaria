@@ -511,22 +511,20 @@ model ReceivableInstallment {
 }
 
 model Payable {
-  id String @id @default(cuid())
-
-  // fornecedor (usa Client com type FORNECEDOR/BOTH)
-  supplierId String?
-  supplier   Client? @relation(fields: [supplierId], references: [id])
-
-  salonId String
-  salon   Salon  @relation(fields: [salonId], references: [id])
-
+  id          String   @id @default(cuid())
+  supplierId  String?
+  supplier    Client?  @relation(fields: [supplierId], references: [id])
+  salonId     String
+  salon       Salon    @relation(fields: [salonId], references: [id])
   description String
-  totalCents  Int    @default(0)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  totalCents  Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   installments PayableInstallment[]
+
+  // ✅ NOVO: link com entradas do estoque
+  materialMovements MaterialMovement[] @relation("MaterialMovementPayable")
 
   @@index([salonId, createdAt])
   @@index([supplierId])
@@ -647,14 +645,21 @@ model MaterialMovement {
   orderId String?
   order   Order?  @relation(fields: [orderId], references: [id])
 
+  // ✅ NOVO: link com contas a pagar (parcelas do fornecedor)
+  payableId String?
+  payable   Payable? @relation("MaterialMovementPayable", fields: [payableId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([salonId, occurredAt])
   @@index([salonId, type])
-  @@index([materialId])
+  @@index([materialId, occurredAt])
+  @@index([supplierId, occurredAt])
   @@index([orderId])
-  @@index([supplierId])
   @@index([nfNumber])
+  // ✅ NOVO: index pra consulta rápida
+  @@index([payableId])
 }
 
 model MaterialSupplierPrice {
