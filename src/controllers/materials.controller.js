@@ -20,6 +20,58 @@ function toFloat(v, field) {
   return { ok: true, value: n };
 }
 
+function daysInMonthUTC(year, monthIndex0) {
+  // monthIndex0: 0-11
+  return new Date(Date.UTC(year, monthIndex0 + 1, 0, 12, 0, 0)).getUTCDate();
+}
+
+function addMonthsUTC(date, monthsToAdd) {
+  const d = new Date(date);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth();
+  const day = d.getUTCDate();
+
+  // vai pro 1º dia do mês pra evitar overflow
+  const base = new Date(Date.UTC(y, m, 1, 12, 0, 0));
+  base.setUTCMonth(base.getUTCMonth() + monthsToAdd);
+
+  const dim = daysInMonthUTC(base.getUTCFullYear(), base.getUTCMonth());
+  base.setUTCDate(Math.min(day, dim));
+
+  return base;
+}
+
+function buildPayableInstallments({ totalCents, count, firstDueDate, method, paidNow, paidAt }) {
+  const n = Math.max(1, Math.min(48, Number(count || 1)));
+  const base = Math.floor(totalCents / n);
+  const remainder = totalCents - base * n;
+
+  const rows = [];
+  for (let i = 1; i <= n; i++) {
+    const amount = i === n ? base + remainder : base;
+    const dueDate = addMonthsUTC(firstDueDate, i - 1);
+
+    const isSingleAndPaid = Boolean(paidNow) && n === 1;
+
+    rows.push({
+      number: i,
+      dueDate,
+      amountCents: amount,
+      status: isSingleAndPaid ? "PAGO" : "PENDENTE",
+      paidAt: isSingleAndPaid ? paidAt : null,
+      method: method || null,
+    });
+  }
+  return rows;
+}
+
+function isValidPaymentMethod(m) {
+  if (!m) return true;
+  const v = String(m).toUpperCase();
+  return ["PIX", "CARTAO", "DINHEIRO", "BOLETO", "TRANSFERENCIA", "OUTRO"].includes(v);
+}
+
+
 function parseMonthRange(monthStr) {
   // monthStr: "YYYY-MM"
   if (!monthStr || typeof monthStr !== "string") return null;
@@ -485,6 +537,7 @@ async function listMovements(req, res) {
       where,
       include: { material: true, supplier: true },
       orderBy: { occurredAt: "desc" },
+      
     });
 
     return res.json({ movements });
@@ -500,135 +553,210 @@ async function createMovement(req, res) {
   const { salonId } = req.user;
 
   const {
-    materialId,
     type,
-    source,
+    materialId,
     qty,
     unitCostCents,
     occurredAt,
     notes,
-    orderId,
+    source = "MANUAL",
+
     supplierId,
     nfNumber,
+
+    // ✅ NOVO: opcional (quando for compra parcelada)
+    payable, 
+    // payable: {
+    //   enabled?: boolean,
+    //   installmentsCount?: number,
+    //   firstDueDate?: string|Date,
+    //   method?: "PIX"|"CARTAO"|...,
+    //   paidNow?: boolean,
+    //   description?: string
+    // }
   } = req.body || {};
 
+  if (!type || !["IN", "OUT", "ADJUST"].includes(type)) {
+    return res.status(400).json({ message: "Tipo inválido (IN/OUT/ADJUST)." });
+  }
   if (!materialId) return res.status(400).json({ message: "materialId é obrigatório." });
 
+  const qtyN = toFloat(qty);
+  if (!Number.isFinite(qtyN) || qtyN <= 0) {
+    return res.status(400).json({ message: "Quantidade inválida." });
+  }
+
+  const occurredAtDt = toDate(occurredAt);
+  if (!occurredAtDt) return res.status(400).json({ message: "Data inválida." });
+
+  // OUT não precisa custo / fornecedor / NF
+  let unitCents = toInt(unitCostCents);
+  let supId = supplierId || null;
+  let nf = (nfNumber || "").trim() || null;
+
+  if (type === "OUT") {
+    unitCents = 0;
+    supId = null;
+    nf = null;
+  }
+
+  // IN exige fornecedor
+  if (type === "IN") {
+    if (!supId) return res.status(400).json({ message: "Fornecedor é obrigatório na entrada (IN)." });
+    if (!Number.isFinite(unitCents) || unitCents <= 0) {
+      return res.status(400).json({ message: "Custo unitário inválido." });
+    }
+  }
+
+  // valida material
   const mat = await prisma.material.findFirst({
     where: { id: materialId, salonId },
-    select: { id: true, name: true, unit: true }, // ✅ vamos usar name no custo
+    select: { id: true, name: true, unit: true, isActive: true },
   });
   if (!mat) return res.status(404).json({ message: "Material não encontrado." });
 
-  const typeNorm = normalizeMovementType(type);
-  if (!typeNorm) return res.status(400).json({ message: "type inválido (IN, OUT, ADJUST)." });
-
-  let supplierIdFinal = null;
-  let nfNumberFinal = null;
-
-  if (typeNorm === "IN") {
-    if (!supplierId) {
-      return res.status(400).json({ message: "supplierId é obrigatório para Entrada (IN)." });
-    }
-
+  // IN: valida fornecedor (tipo FORNECEDOR/BOTH)
+  if (type === "IN") {
     const supplier = await prisma.client.findFirst({
-      where: { id: supplierId, salonId },
-      select: { id: true, type: true, name: true },
+      where: {
+        id: supId,
+        salonId,
+        OR: [{ type: "FORNECEDOR" }, { type: "BOTH" }],
+      },
+      select: { id: true },
     });
-
-    if (!supplier) return res.status(404).json({ message: "Fornecedor não encontrado." });
-
-    const t = String(supplier.type || "").toUpperCase();
-    if (t !== "FORNECEDOR" && t !== "BOTH") {
-      return res.status(400).json({ message: "Cliente selecionado não é FORNECEDOR/BOTH." });
-    }
-
-    supplierIdFinal = supplierId;
-    nfNumberFinal = nfNumber ? String(nfNumber).trim().slice(0, 50) : null;
-  } else {
-    supplierIdFinal = null;
-    nfNumberFinal = null;
+    if (!supplier) return res.status(400).json({ message: "Fornecedor inválido." });
   }
 
-  const sourceNorm = normalizeMovementSource(source) || "MANUAL";
-  if (source !== undefined && sourceNorm === null) return res.status(400).json({ message: "source inválido." });
+  // ✅ decide se cria Payable
+  const p = payable && typeof payable === "object" ? payable : null;
+  const wantPayable =
+    type === "IN" &&
+    !!p &&
+    (p.enabled === true ||
+      Number(p.installmentsCount || 0) > 0 ||
+      !!p.firstDueDate ||
+      !!p.method);
 
-  const q = toFloat(qty, "qty");
-  if (!q.ok) return res.status(400).json({ message: q.message });
-  if (q.value <= 0) return res.status(400).json({ message: "qty deve ser > 0." });
+  if (wantPayable) {
+    if (!isValidPaymentMethod(p.method)) {
+      return res.status(400).json({ message: "Método de pagamento do payable inválido." });
+    }
+  }
 
-  const cost = unitCostCents !== undefined ? toInt(unitCostCents, "unitCostCents") : { ok: true, value: 0 };
-  if (!cost.ok) return res.status(400).json({ message: cost.message });
-  if (cost.value < 0) return res.status(400).json({ message: "unitCostCents inválido." });
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      let payableId = null;
 
-  const occ = occurredAt ? new Date(occurredAt) : new Date();
-  if (Number.isNaN(occ.getTime())) return res.status(400).json({ message: "occurredAt inválido (use ISO date)." });
+      // =========================
+      // 1) (opcional) cria PAYABLE + parcelas
+      // =========================
+      if (wantPayable) {
+        const totalCents = Math.round(qtyN * unitCents);
 
-  const yearMonth = monthKeyFromDate(occ);
+        const installmentsCount = Math.max(1, Math.min(48, toInt(p.installmentsCount || 1) || 1));
+        const firstDue = toDate(p.firstDueDate) || occurredAtDt;
 
-  const created = await prisma.$transaction(async (tx) => {
-    // 1) cria movimentação
-    const mv = await tx.materialMovement.create({
-      data: {
-        salonId,
-        materialId,
-        type: typeNorm,
-        source: sourceNorm,
-        qty: q.value,
-        unitCostCents: cost.value,
-        occurredAt: occ,
-        notes: notes ? String(notes).trim() : null,
-        orderId: orderId || null,
+        const method = p.method ? String(p.method).toUpperCase() : null;
 
-        supplierId: supplierIdFinal,
-        nfNumber: nfNumberFinal,
-      },
-      include: {
-        material: { select: { id: true, name: true, unit: true } },
-        supplier: { select: { id: true, name: true, phone: true, type: true } },
-      },
-    });
+        const description =
+          (p.description || "").trim() ||
+          `Compra de estoque: ${mat.name}${nf ? ` • NF ${nf}` : ""}`;
 
-    // 2) se for ENTRADA (compra), cria custo automático
-    if (mv.type === "IN") {
-      const totalCents = Math.round((Number(mv.qty) || 0) * (Number(mv.unitCostCents) || 0));
+        const installments = buildPayableInstallments({
+          totalCents,
+          count: installmentsCount,
+          firstDueDate: firstDue,
+          method,
+          paidNow: Boolean(p.paidNow),
+          paidAt: occurredAtDt,
+        });
 
-      // ✅ descrição única pra evitar duplicação em reenvio/clique duplo
-      const descKey = `ESTOQUE_MOVEMENT:${mv.id}`;
+        const createdPayable = await tx.payable.create({
+          data: {
+            salonId,
+            supplierId: supId,
+            description,
+            totalCents,
+            installments: { create: installments },
+          },
+          select: { id: true },
+        });
 
-      const already = await tx.cost.findFirst({
-        where: { salonId, description: descKey },
-        select: { id: true },
+        payableId = createdPayable.id;
+      }
+
+      // =========================
+      // 2) cria MOVEMENT (linka payableId se existir)
+      // =========================
+      const created = await tx.materialMovement.create({
+        data: {
+          salonId,
+          materialId,
+          type,
+          source,
+          qty: qtyN,
+          unitCostCents: unitCents,
+          occurredAt: occurredAtDt,
+          notes: notes || null,
+          supplierId: type === "IN" ? supId : null,
+          nfNumber: type === "IN" ? nf : null,
+          payableId: payableId,
+        },
+        select: {
+          id: true,
+          type: true,
+          source: true,
+          qty: true,
+          unitCostCents: true,
+          occurredAt: true,
+          notes: true,
+          nfNumber: true,
+          supplierId: true,
+          payableId: true,
+          material: { select: { id: true, name: true, unit: true } },
+          supplier: { select: { id: true, name: true, phone: true } },
+          payable: payableId
+            ? { select: { id: true, description: true, totalCents: true } }
+            : false,
+        },
       });
 
-      if (!already) {
+      // =========================
+      // 3) mantém seu COST (como já era)
+      // =========================
+      if (type === "IN") {
+        const amountCents = Math.round(qtyN * unitCents);
+        const yearMonth = monthKeyFromDate(occurredAtDt);
+
+        const descKey = `ESTOQUE:${supId}:${nf || "-"}:${mat.name}`;
         await tx.cost.create({
           data: {
             salonId,
             type: "VARIAVEL",
-            name: mv.material?.name || "Compra de material",
-            category: "MATERIAIS",
-            amountCents: totalCents,
-            occurredAt: mv.occurredAt,
-            yearMonth,
-            supplierId: mv.supplierId || null,
-
-            // ✅ compra não é recorrente
+            name: `Compra de material — ${mat.name}`,
+            description: nf ? `NF: ${nf}` : null,
+            category: "Estoque",
             isRecurring: false,
-            recurringGroupId: null,
-
-            // ✅ amarra custo ao movimento
-            description: descKey,
+            recurringGroupId: descKey,
+            yearMonth,
+            amountCents,
+            occurredAt: occurredAtDt,
+            supplierId: supId,
           },
         });
       }
-    }
 
-    return mv;
-  });
+      return created;
+    });
 
-  return res.status(201).json({ movement: created });
+    return res.status(201).json({ movement: result });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: "Erro ao criar movimentação." });
+  }
 }
+
 
 
 // GET /api/materials/stock

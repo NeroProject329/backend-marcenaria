@@ -55,7 +55,9 @@ async function listPayables(req, res) {
       totalCents: true,
       createdAt: true,
       updatedAt: true,
+
       supplier: { select: { id: true, name: true, phone: true, type: true } },
+
       installments: {
         orderBy: { number: "asc" },
         select: {
@@ -68,11 +70,26 @@ async function listPayables(req, res) {
           method: true,
         },
       },
+
+      // ✅ NOVO: itens (materiais) vinculados a essa compra
+      materialMovements: {
+        where: { type: "IN" }, // só entradas
+        orderBy: { occurredAt: "desc" },
+        select: {
+          id: true,
+          qty: true,
+          unitCostCents: true,
+          occurredAt: true,
+          nfNumber: true,
+          material: { select: { id: true, name: true, unit: true } },
+        },
+      },
     },
   });
 
   return res.json({ payables });
 }
+
 
 // GET /api/payables/:id
 async function getPayable(req, res) {
@@ -87,7 +104,11 @@ async function getPayable(req, res) {
       totalCents: true,
       createdAt: true,
       updatedAt: true,
-      supplier: { select: { id: true, name: true, phone: true, instagram: true, notes: true, type: true } },
+
+      supplier: {
+        select: { id: true, name: true, phone: true, instagram: true, notes: true, type: true },
+      },
+
       installments: {
         orderBy: { number: "asc" },
         select: {
@@ -100,12 +121,36 @@ async function getPayable(req, res) {
           method: true,
         },
       },
+
+      // ✅ NOVO: itens vinculados a essa compra (entradas do estoque)
+      materialMovements: {
+        where: { type: "IN" }, // só entradas
+        orderBy: { occurredAt: "desc" },
+        select: {
+          id: true,
+          qty: true,
+          unitCostCents: true,
+          occurredAt: true,
+          nfNumber: true,
+          notes: true,
+
+          material: {
+            select: { id: true, name: true, unit: true },
+          },
+
+          // opcional: se quiser mostrar fornecedor por item também
+          supplier: {
+            select: { id: true, name: true, phone: true, type: true },
+          },
+        },
+      },
     },
   });
 
   if (!payable) return res.status(404).json({ message: "Pagamento/conta não encontrado." });
   return res.json({ payable });
 }
+
 
 // POST /api/payables
 // body: { description, supplierId?, installments: [{ dueDate, amountCents, method? }] }
