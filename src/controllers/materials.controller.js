@@ -13,11 +13,30 @@ function toInt(v, field) {
 }
 
 function toFloat(v, field) {
-  const n = Number(String(v ?? "").replace(",", "."));
+  const s = String(v ?? "").trim();
+  if (!s) return { ok: false, message: `Campo inválido: ${field}` };
+
+  // aceita "1,5" e "1.234,56"
+  const normalized = s.includes(",") ? s.replace(/\./g, "").replace(",", ".") : s;
+  const n = Number(normalized);
+
   if (!Number.isFinite(n)) {
     return { ok: false, message: `Campo inválido: ${field}` };
   }
   return { ok: true, value: n };
+}
+
+function toDate(v, field) {
+  if (v === undefined || v === null || v === "") {
+    return { ok: true, value: null };
+  }
+
+  const d = new Date(String(v));
+  if (Number.isNaN(d.getTime())) {
+    return { ok: false, message: `Campo inválido: ${field}` };
+  }
+
+  return { ok: true, value: d };
 }
 
 function daysInMonthUTC(year, monthIndex0) {
@@ -552,60 +571,52 @@ async function listMovements(req, res) {
 async function createMovement(req, res) {
   const { salonId } = req.user;
 
-  const {
-    type,
-    materialId,
-    qty,
-    unitCostCents,
-    occurredAt,
-    notes,
-    source = "MANUAL",
+  const body = req.body || {};
 
-    supplierId,
-    nfNumber,
+  const type = String(body.type || "").toUpperCase();
+  const materialId = body.materialId;
+  const notes = body.notes ? String(body.notes).trim() : null;
 
-    // ✅ NOVO: opcional (quando for compra parcelada)
-    payable, 
-    //payable: {
-    //   enabled?: boolean,
-    //   installmentsCount?: number,
-    //   firstDueDate?: string|Date,
-    //   method?: "PIX"|"CARTAO"|...,
-    //   paidNow?: boolean,
-    //   description?: string
-    // }
-  } = req.body || {};
+  // source
+  const sourceRaw = body.source ? String(body.source).toUpperCase() : "MANUAL";
+  const sourceAllowed = new Set(["MANUAL", "ORDER", "PURCHASE"]);
+  const source = sourceAllowed.has(sourceRaw) ? sourceRaw : "MANUAL";
+
+  // qty (aceita qty/qtd/quantity)
+  const qtyRaw = body.qty ?? body.qtd ?? body.quantity;
+  const qRes = toFloat(qtyRaw, "qty");
+  if (!qRes.ok) return res.status(400).json({ message: qRes.message });
+  const qtyN = qRes.value;
+  if (qtyN <= 0) return res.status(400).json({ message: "Quantidade inválida." });
+
+  // occurredAt
+  const occRes = toDate(body.occurredAt, "occurredAt");
+  if (!occRes.ok) return res.status(400).json({ message: occRes.message });
+  const occurredAtDt = occRes.value || new Date();
 
   if (!type || !["IN", "OUT", "ADJUST"].includes(type)) {
     return res.status(400).json({ message: "Tipo inválido (IN/OUT/ADJUST)." });
   }
   if (!materialId) return res.status(400).json({ message: "materialId é obrigatório." });
 
-  const qtyRaw = req.body?.qty ?? req.body?.qtd ?? req.body?.quantity;
-const q = toFloat(qtyRaw, "qty");
-if (!q.ok) return res.status(400).json({ message: "Quantidade inválida." });
-if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida." });
+  // unitCostCents
+  let unitCents = 0;
+  if (type !== "OUT") {
+    const unitRes = toInt(body.unitCostCents ?? 0, "unitCostCents");
+    if (!unitRes.ok) return res.status(400).json({ message: unitRes.message });
+    unitCents = unitRes.value;
+    if (unitCents < 0) return res.status(400).json({ message: "Custo unitário inválido." });
+  }
 
-  const occurredAtDt = toDate(occurredAt);
-  if (!occurredAtDt) return res.status(400).json({ message: "Data inválida." });
+  // supplier / nf
+  let supId = body.supplierId ? String(body.supplierId).trim() : null;
+  let nf = body.nfNumber ? String(body.nfNumber).trim().slice(0, 50) : null;
 
-  // OUT não precisa custo / fornecedor / NF
-  let unitCents = toInt(unitCostCents);
-  let supId = supplierId || null;
-  let nf = (nfNumber || "").trim() || null;
-
+  // OUT não guarda fornecedor/NF nem custo
   if (type === "OUT") {
     unitCents = 0;
     supId = null;
     nf = null;
-  }
-
-  // IN exige fornecedor
-  if (type === "IN") {
-    if (!supId) return res.status(400).json({ message: "Fornecedor é obrigatório na entrada (IN)." });
-    if (!Number.isFinite(unitCents) || unitCents <= 0) {
-      return res.status(400).json({ message: "Custo unitário inválido." });
-    }
   }
 
   // valida material
@@ -615,8 +626,13 @@ if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida."
   });
   if (!mat) return res.status(404).json({ message: "Material não encontrado." });
 
-  // IN: valida fornecedor (tipo FORNECEDOR/BOTH)
+  // IN exige fornecedor + custo > 0
   if (type === "IN") {
+    if (!supId) return res.status(400).json({ message: "Fornecedor é obrigatório na entrada (IN)." });
+    if (!Number.isFinite(unitCents) || unitCents <= 0) {
+      return res.status(400).json({ message: "Custo unitário inválido." });
+    }
+
     const supplier = await prisma.client.findFirst({
       where: {
         id: supId,
@@ -628,18 +644,18 @@ if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida."
     if (!supplier) return res.status(400).json({ message: "Fornecedor inválido." });
   }
 
-  // ✅ decide se cria Payable
-  const p = payable && typeof payable === "object" ? payable : null;
+  // payable opcional (compra parcelada)
+  const p = body.payable && typeof body.payable === "object" ? body.payable : null;
   const wantPayable =
     type === "IN" &&
     !!p &&
     (p.enabled === true ||
-      Number(p.installmentsCount || 0) > 0 ||
+      Number(p.installmentsCount || 0) > 1 ||
       !!p.firstDueDate ||
       !!p.method);
 
   if (wantPayable) {
-    if (!isValidPaymentMethod(p.method)) {
+    if (p.method && !isValidPaymentMethod(p.method)) {
       return res.status(400).json({ message: "Método de pagamento do payable inválido." });
     }
   }
@@ -649,15 +665,23 @@ if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida."
       let payableId = null;
 
       // =========================
-      // 1) (opcional) cria PAYABLE + parcelas
+      // 1) cria PAYABLE + parcelas (opcional)
       // =========================
       if (wantPayable) {
         const totalCents = Math.round(qtyN * unitCents);
 
-        const installmentsCount = Math.max(1, Math.min(48, toInt(p.installmentsCount || 1) || 1));
-        const firstDue = toDate(p.firstDueDate) || occurredAtDt;
+        const countRes = toInt(p.installmentsCount ?? 1, "installmentsCount");
+        const installmentsCount = Math.max(1, Math.min(48, countRes.ok ? countRes.value : 1));
+
+        const firstDueRes = toDate(p.firstDueDate, "firstDueDate");
+        if (!firstDueRes.ok) {
+          // se veio firstDueDate inválida, derruba com 400
+          throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
+        }
+        const firstDue = firstDueRes.value || occurredAtDt;
 
         const method = p.method ? String(p.method).toUpperCase() : null;
+        const paidNow = Boolean(p.paidNow);
 
         const description =
           (p.description || "").trim() ||
@@ -668,7 +692,7 @@ if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida."
           count: installmentsCount,
           firstDueDate: firstDue,
           method,
-          paidNow: Boolean(p.paidNow),
+          paidNow,
           paidAt: occurredAtDt,
         });
 
@@ -698,38 +722,25 @@ if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida."
           qty: qtyN,
           unitCostCents: unitCents,
           occurredAt: occurredAtDt,
-          notes: notes || null,
+          notes,
           supplierId: type === "IN" ? supId : null,
           nfNumber: type === "IN" ? nf : null,
           payableId: payableId,
         },
-        select: {
-          id: true,
-          type: true,
-          source: true,
-          qty: true,
-          unitCostCents: true,
-          occurredAt: true,
-          notes: true,
-          nfNumber: true,
-          supplierId: true,
-          payableId: true,
+        include: {
           material: { select: { id: true, name: true, unit: true } },
           supplier: { select: { id: true, name: true, phone: true } },
-          payable: payableId
-            ? { select: { id: true, description: true, totalCents: true } }
-            : false,
+          payable: payableId ? { select: { id: true, description: true, totalCents: true } } : false,
         },
       });
 
       // =========================
-      // 3) mantém seu COST (como já era)
+      // 3) cria COST (compra de estoque) — variável e não recorrente
       // =========================
       if (type === "IN") {
         const amountCents = Math.round(qtyN * unitCents);
         const yearMonth = monthKeyFromDate(occurredAtDt);
 
-        const descKey = `ESTOQUE:${supId}:${nf || "-"}:${mat.name}`;
         await tx.cost.create({
           data: {
             salonId,
@@ -738,7 +749,7 @@ if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida."
             description: nf ? `NF: ${nf}` : null,
             category: "Estoque",
             isRecurring: false,
-            recurringGroupId: descKey,
+            recurringGroupId: null, // 👈 IMPORTANTÍSSIMO pra não bater unique
             yearMonth,
             amountCents,
             occurredAt: occurredAtDt,
@@ -752,7 +763,11 @@ if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida."
 
     return res.status(201).json({ movement: result });
   } catch (e) {
-    console.error(e);
+    // se eu joguei um erro com statusCode 400
+    if (e && e.statusCode === 400) {
+      return res.status(400).json({ message: e.message });
+    }
+    console.error("createMovement error:", e);
     return res.status(500).json({ message: "Erro ao criar movimentação." });
   }
 }
