@@ -13,7 +13,7 @@ function toInt(v, field) {
 }
 
 function toFloat(v, field) {
-  const n = Number(v);
+  const n = Number(String(v ?? "").replace(",", "."));
   if (!Number.isFinite(n)) {
     return { ok: false, message: `Campo inválido: ${field}` };
   }
@@ -566,7 +566,7 @@ async function createMovement(req, res) {
 
     // ✅ NOVO: opcional (quando for compra parcelada)
     payable, 
-    // payable: {
+    //payable: {
     //   enabled?: boolean,
     //   installmentsCount?: number,
     //   firstDueDate?: string|Date,
@@ -581,10 +581,10 @@ async function createMovement(req, res) {
   }
   if (!materialId) return res.status(400).json({ message: "materialId é obrigatório." });
 
-  const qtyN = toFloat(qty);
-  if (!Number.isFinite(qtyN) || qtyN <= 0) {
-    return res.status(400).json({ message: "Quantidade inválida." });
-  }
+  const qtyRaw = req.body?.qty ?? req.body?.qtd ?? req.body?.quantity;
+const q = toFloat(qtyRaw, "qty");
+if (!q.ok) return res.status(400).json({ message: "Quantidade inválida." });
+if (q.value <= 0) return res.status(400).json({ message: "Quantidade inválida." });
 
   const occurredAtDt = toDate(occurredAt);
   if (!occurredAtDt) return res.status(400).json({ message: "Data inválida." });
