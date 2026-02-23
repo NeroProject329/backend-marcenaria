@@ -48,7 +48,7 @@ async function getSettings(req, res) {
 });
 
 }
-
+  
 /**
  * PATCH /api/settings
  */
