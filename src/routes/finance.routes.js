@@ -45,4 +45,6 @@ router.get("/receivables/month", checkLimit("finance"), receivablesByMonth);
 // ✅ NOVO: pagamentos por mês (parcelas)
 router.get("/payables/month", checkLimit("finance"), payablesByMonth);
 
+
+
 module.exports = router;

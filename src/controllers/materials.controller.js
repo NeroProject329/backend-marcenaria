@@ -737,26 +737,28 @@ async function createMovement(req, res) {
       // =========================
       // 3) cria COST (compra de estoque) — variável e não recorrente
       // =========================
-      if (type === "IN") {
-        const amountCents = Math.round(qtyN * unitCents);
-        const yearMonth = monthKeyFromDate(occurredAtDt);
+      // 3) COST (apenas quando NÃO houver payable)
+if (type === "IN" && !wantPayable) {
+  const amountCents = Math.round(qtyN * unitCents);
+  const yearMonth = monthKeyFromDate(occurredAtDt);
 
-        await tx.cost.create({
-          data: {
-            salonId,
-            type: "VARIAVEL",
-            name: `Compra de material — ${mat.name}`,
-            description: nf ? `NF: ${nf}` : null,
-            category: "Estoque",
-            isRecurring: false,
-            recurringGroupId: null, // 👈 IMPORTANTÍSSIMO pra não bater unique
-            yearMonth,
-            amountCents,
-            occurredAt: occurredAtDt,
-            supplierId: supId,
-          },
-        });
-      }
+  const descKey = `ESTOQUE:${supId}:${nf || "-"}:${mat.name}`;
+  await tx.cost.create({
+    data: {
+      salonId,
+      type: "VARIAVEL",
+      name: `Compra de material — ${mat.name}`,
+      description: nf ? `NF: ${nf}` : null,
+      category: "Estoque",
+      isRecurring: false,
+      recurringGroupId: descKey,
+      yearMonth,
+      amountCents,
+      occurredAt: occurredAtDt,
+      supplierId: supId,
+    },
+  });
+}
 
       return created;
     });

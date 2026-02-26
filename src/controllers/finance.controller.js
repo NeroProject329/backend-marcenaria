@@ -201,6 +201,89 @@ async function sumPayablesPaid({ salonId, from, to }) {
   return agg._sum.amountCents || 0;
 }
 
+async function payablesMonth(req, res) {
+  const { salonId } = req.user;
+  const { month } = req.query; // "YYYY-MM"
+
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ message: "month inválido. Use YYYY-MM" });
+  }
+
+  const [yy, mm] = month.split("-").map(Number);
+  const from = new Date(Date.UTC(yy, mm - 1, 1));
+  const to = new Date(Date.UTC(yy, mm, 1));
+
+  // 1) Parcelas de PAYABLE (fornecedor / compra parcelada etc)
+  const inst = await prisma.payableInstallment.findMany({
+    where: {
+      dueDate: { gte: from, lt: to },
+      payable: { salonId },
+    },
+    orderBy: { dueDate: "asc" },
+    include: {
+      payable: {
+        select: {
+          id: true,
+          description: true,
+          supplier: { select: { id: true, name: true, phone: true } },
+          installments: { select: { id: true } }, // pra contar total de parcelas
+        },
+      },
+    },
+  });
+
+  const items = inst.map((i) => ({
+    source: "PAYABLE",
+    payableId: i.payableId,
+    supplier: i.payable?.supplier || null,
+    supplierName: i.payable?.supplier?.name || null,
+    description: i.payable?.description || "Conta a pagar",
+    number: i.number,
+    installmentsCount: i.payable?.installments?.length || null,
+    dueDate: i.dueDate,
+    amountCents: i.amountCents,
+    status: i.status,
+    paidAt: i.paidAt,
+    method: i.method,
+  }));
+
+  // (Opcional) se você quiser também jogar “custos do mês” aqui,
+  // faça isso, mas RECOMENDO ignorar category="Estoque" pra não duplicar com PAYABLE:
+  const costs = await prisma.cost.findMany({
+    where: { salonId, yearMonth: month, NOT: { category: "Estoque" } },
+    select: {
+      id: true,
+      name: true,
+      amountCents: true,
+      occurredAt: true,
+      supplier: { select: { id: true, name: true } },
+      category: true,
+      type: true,
+    },
+    orderBy: { occurredAt: "asc" },
+  });
+
+  const costItems = costs.map((c) => ({
+    source: "COST",
+    supplier: c.supplier || null,
+    supplierName: c.supplier?.name || null,
+    description: c.name,
+    number: null,
+    installmentsCount: null,
+    dueDate: c.occurredAt,
+    amountCents: c.amountCents,
+    status: "PENDENTE", // ou null
+    paidAt: null,
+    method: null,
+  }));
+
+  const out = [...items, ...costItems].sort(
+    (a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()
+  );
+
+  return res.json({ items: out });
+}
+
 async function sumCosts({ salonId, from, to }) {
   // Custos (fixo/variável): saída por occurredAt
   const agg = await prisma.cost.aggregate({
