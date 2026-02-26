@@ -567,7 +567,6 @@ async function listMovements(req, res) {
 }
 
 // POST /api/materials/movements
-// POST /api/materials/movements
 async function createMovement(req, res) {
   const { salonId } = req.user;
 
@@ -644,15 +643,28 @@ async function createMovement(req, res) {
     if (!supplier) return res.status(400).json({ message: "Fornecedor inválido." });
   }
 
-  // payable opcional (compra parcelada)
+  // payable opcional (compra à vista/parcelada)
   const p = body.payable && typeof body.payable === "object" ? body.payable : null;
-  const wantPayable =
-    type === "IN" &&
+
+  const enabled =
     !!p &&
     (p.enabled === true ||
-      Number(p.installmentsCount || 0) > 1 ||
+      p.enabled === 1 ||
+      p.enabled === "1" ||
+      String(p.enabled || "").toLowerCase() === "true");
+
+  const installmentsCountNum = Number(p?.installmentsCount || 0);
+  const inferredWantPayable =
+    !!p &&
+    (Number.isFinite(installmentsCountNum) && installmentsCountNum >= 1 ||
       !!p.firstDueDate ||
-      !!p.method);
+      !!p.method ||
+      p.paidNow === true ||
+      p.paidNow === 1 ||
+      p.paidNow === "1" ||
+      String(p.paidNow || "").toLowerCase() === "true");
+
+  const wantPayable = type === "IN" && !!p && (enabled || inferredWantPayable);
 
   if (wantPayable) {
     if (p.method && !isValidPaymentMethod(p.method)) {
@@ -675,13 +687,16 @@ async function createMovement(req, res) {
 
         const firstDueRes = toDate(p.firstDueDate, "firstDueDate");
         if (!firstDueRes.ok) {
-          // se veio firstDueDate inválida, derruba com 400
           throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
         }
         const firstDue = firstDueRes.value || occurredAtDt;
 
         const method = p.method ? String(p.method).toUpperCase() : null;
-        const paidNow = Boolean(p.paidNow);
+        const paidNow =
+          p.paidNow === true ||
+          p.paidNow === 1 ||
+          p.paidNow === "1" ||
+          String(p.paidNow || "").toLowerCase() === "true";
 
         const description =
           (p.description || "").trim() ||
@@ -735,37 +750,35 @@ async function createMovement(req, res) {
       });
 
       // =========================
-      // 3) cria COST (compra de estoque) — variável e não recorrente
-      // =========================
       // 3) COST (apenas quando NÃO houver payable)
-if (type === "IN" && !wantPayable) {
-  const amountCents = Math.round(qtyN * unitCents);
-  const yearMonth = monthKeyFromDate(occurredAtDt);
+      // =========================
+      if (type === "IN" && !wantPayable) {
+        const amountCents = Math.round(qtyN * unitCents);
+        const yearMonth = monthKeyFromDate(occurredAtDt);
 
-  const descKey = `ESTOQUE:${supId}:${nf || "-"}:${mat.name}`;
-  await tx.cost.create({
-    data: {
-      salonId,
-      type: "VARIAVEL",
-      name: `Compra de material — ${mat.name}`,
-      description: nf ? `NF: ${nf}` : null,
-      category: "Estoque",
-      isRecurring: false,
-      recurringGroupId: descKey,
-      yearMonth,
-      amountCents,
-      occurredAt: occurredAtDt,
-      supplierId: supId,
-    },
-  });
-}
+        const descKey = `ESTOQUE:${supId}:${nf || "-"}:${mat.name}`;
+        await tx.cost.create({
+          data: {
+            salonId,
+            type: "VARIAVEL",
+            name: `Compra de material — ${mat.name}`,
+            description: nf ? `NF: ${nf}` : null,
+            category: "Estoque",
+            isRecurring: false,
+            recurringGroupId: descKey,
+            yearMonth,
+            amountCents,
+            occurredAt: occurredAtDt,
+            supplierId: supId,
+          },
+        });
+      }
 
       return created;
     });
 
     return res.status(201).json({ movement: result });
   } catch (e) {
-    // se eu joguei um erro com statusCode 400
     if (e && e.statusCode === 400) {
       return res.status(400).json({ message: e.message });
     }

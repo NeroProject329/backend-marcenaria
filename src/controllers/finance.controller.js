@@ -286,8 +286,13 @@ async function payablesMonth(req, res) {
 
 async function sumCosts({ salonId, from, to }) {
   // Custos (fixo/variável): saída por occurredAt
+  // ✅ IMPORTANTe: ignora "Estoque" (estoque deve refletir via PAYABLE)
   const agg = await prisma.cost.aggregate({
-    where: { salonId, occurredAt: { gte: from, lt: to } },
+    where: {
+      salonId,
+      occurredAt: { gte: from, lt: to },
+      NOT: { category: "Estoque" },
+    },
     _sum: { amountCents: true },
   });
   return agg._sum.amountCents || 0;
@@ -419,6 +424,7 @@ async function receivablesByMonth(req, res) {
   });
 }
 
+
 // ✅ NOVO: GET /api/finance/payables/month?month=YYYY-MM
 async function payablesByMonth(req, res) {
   const { salonId } = req.user;
@@ -431,50 +437,82 @@ async function payablesByMonth(req, res) {
       where: { payable: { salonId }, dueDate: { gte: range.from, lt: range.to } },
       orderBy: [{ dueDate: "asc" }, { number: "asc" }],
       select: {
-        id: true, number: true, dueDate: true, amountCents: true, status: true, paidAt: true, method: true,
-        payable: { select: { id: true, description: true, supplier: { select: { id: true, name: true, phone: true } } } },
+        id: true,
+        number: true,
+        dueDate: true,
+        amountCents: true,
+        status: true,
+        paidAt: true,
+        method: true,
+        payable: {
+          select: {
+            id: true,
+            description: true,
+            supplier: { select: { id: true, name: true, phone: true } },
+            installments: { select: { id: true } }, // pra contar total
+          },
+        },
       },
     }),
+
+    // ✅ custos gerais do mês (ignora Estoque pra não duplicar com PAYABLE)
     prisma.cost.findMany({
-      where: { salonId, occurredAt: { gte: range.from, lt: range.to } },
+      where: {
+        salonId,
+        occurredAt: { gte: range.from, lt: range.to },
+        NOT: { category: "Estoque" },
+      },
       orderBy: { occurredAt: "asc" },
-      select: { id: true, name: true, amountCents: true, occurredAt: true, type: true, supplier: { select: { id: true, name: true, phone: true } } },
-    })
+      select: {
+        id: true,
+        name: true,
+        amountCents: true,
+        occurredAt: true,
+        supplier: { select: { id: true, name: true, phone: true } },
+      },
+    }),
   ]);
 
   const mappedInstallments = installments.map((r) => ({
+    source: "PAYABLE",
     id: r.id,
+    payableId: r.payable?.id || null,
+    supplier: r.payable?.supplier || null,
+    supplierName: r.payable?.supplier?.name || null,
+    description: r.payable?.description || "Conta a pagar",
     number: r.number,
+    installmentsCount: r.payable?.installments?.length || null,
     dueDate: r.dueDate,
     amountCents: r.amountCents,
     status: r.status,
     paidAt: r.paidAt,
     method: r.method,
-    payableId: r.payable?.id || null,
-    description: r.payable?.description || null,
-    supplier: r.payable?.supplier || null,
-    source: "PAYABLE",
   }));
 
   const mappedCosts = costs.map((c) => ({
+    source: "COST",
     id: c.id,
+    payableId: null,
+    supplier: c.supplier || null,
+    supplierName: c.supplier?.name || null,
+    description: c.name,
     number: null,
-    dueDate: c.occurredAt,          // custo “vence” na data que ocorreu (ou você pode ter um dueDate futuro se quiser evoluir depois)
+    installmentsCount: null,
+    dueDate: c.occurredAt,
     amountCents: c.amountCents,
     status: "PAGO",
     paidAt: c.occurredAt,
     method: null,
-    payableId: null,
-    description: c.name,
-    supplier: c.supplier || null,
-    source: "COST",
   }));
 
-  const items = [...mappedInstallments, ...mappedCosts]
-    .sort((a,b) => new Date(a.dueDate) - new Date(b.dueDate));
+  const items = [...mappedInstallments, ...mappedCosts].sort(
+    (a, b) => new Date(a.dueDate) - new Date(b.dueDate)
+  );
 
   const totalExpectedCents = items.reduce((a, r) => a + (r.amountCents || 0), 0);
-  const totalPaidCents = items.filter((r) => r.status === "PAGO").reduce((a, r) => a + (r.amountCents || 0), 0);
+  const totalPaidCents = items
+    .filter((r) => r.status === "PAGO")
+    .reduce((a, r) => a + (r.amountCents || 0), 0);
 
   return res.json({
     month,
@@ -486,7 +524,6 @@ async function payablesByMonth(req, res) {
     installments: items,
   });
 }
-
 
 
 
