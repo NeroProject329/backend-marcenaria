@@ -449,15 +449,15 @@ async function deleteMaterial(req, res) {
 // GET /api/materials/movements?month=YYYY-MM
 async function listMovements(req, res) {
   try {
-    const salonId = req.salonId;
+    const { salonId } = req.user;
 
     const {
-      month,              // modo antigo (lista do mês)
-      materialId,         // modo novo (histórico por produto)
-      type,               // IN | OUT | ADJUST
-      q,                  // busca (produto/fornecedor/nf/obs)
-      from,               // YYYY-MM-DD
-      to,                 // YYYY-MM-DD
+      month,
+      materialId,
+      type,
+      q,
+      from,
+      to,
       limit = "50",
       offset = "0",
     } = req.query;
@@ -465,15 +465,11 @@ async function listMovements(req, res) {
     const take = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     const skip = Math.max(parseInt(offset, 10) || 0, 0);
 
-    // ===========================
-    // ✅ MODO NOVO: histórico por material
-    // ===========================
+    // ✅ MODO: histórico por material
     if (materialId) {
       const where = { salonId, materialId };
 
-      if (type && ["IN", "OUT", "ADJUST"].includes(type)) {
-        where.type = type;
-      }
+      if (type && ["IN", "OUT", "ADJUST"].includes(type)) where.type = type;
 
       if (from || to) {
         where.occurredAt = {};
@@ -493,7 +489,18 @@ async function listMovements(req, res) {
 
       const movements = await prisma.materialMovement.findMany({
         where,
-        include: { material: true, supplier: true },
+        include: {
+          material: true,
+          supplier: true,
+          payable: {
+            select: {
+              id: true,
+              description: true,
+              totalCents: true,
+              installments: { select: { id: true } }, // só pra você "ver" que existem
+            },
+          },
+        },
         orderBy: { occurredAt: "desc" },
         skip,
         take,
@@ -502,23 +509,20 @@ async function listMovements(req, res) {
       return res.json({ movements, total, limit: take, offset: skip });
     }
 
-    // ===========================
-    // ✅ MODO ANTIGO: lista do mês (com filtros extras)
-    // ===========================
+    // ✅ MODO: lista do mês
     if (!month) {
       return res.status(400).json({ error: "month é obrigatório (ex: 2026-01) quando materialId não for enviado." });
     }
 
-    const { start, end } = parseMonthRange(month);
+    const range = parseMonthRange(month);
+    if (!range) return res.status(400).json({ error: "month inválido (use YYYY-MM)." });
 
     const where = {
       salonId,
-      occurredAt: { gte: start, lt: end },
+      occurredAt: { gte: range.start, lt: range.end },
     };
 
-    if (type && ["IN", "OUT", "ADJUST"].includes(type)) {
-      where.type = type;
-    }
+    if (type && ["IN", "OUT", "ADJUST"].includes(type)) where.type = type;
 
     if (q && String(q).trim()) {
       const query = String(q).trim();
@@ -537,7 +541,7 @@ async function listMovements(req, res) {
         d.setHours(0, 0, 0, 0);
         where.occurredAt.gte = d;
       } else {
-        where.occurredAt.gte = start;
+        where.occurredAt.gte = range.start;
       }
 
       if (to) {
@@ -545,8 +549,7 @@ async function listMovements(req, res) {
         d.setHours(23, 59, 59, 999);
         where.occurredAt.lte = d;
       } else {
-        // mantém o range do mês
-        const d = new Date(end);
+        const d = new Date(range.end);
         d.setMilliseconds(d.getMilliseconds() - 1);
         where.occurredAt.lte = d;
       }
@@ -554,9 +557,19 @@ async function listMovements(req, res) {
 
     const movements = await prisma.materialMovement.findMany({
       where,
-      include: { material: true, supplier: true },
+      include: {
+        material: true,
+        supplier: true,
+        payable: {
+          select: {
+            id: true,
+            description: true,
+            totalCents: true,
+            installments: { select: { id: true } },
+          },
+        },
+      },
       orderBy: { occurredAt: "desc" },
-      
     });
 
     return res.json({ movements });
