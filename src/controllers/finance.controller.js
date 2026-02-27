@@ -30,13 +30,14 @@ function dayKeyLocal(d) {
 
 function nonStockCostsWhere() {
   // Exclui qualquer custo gerado por compra de estoque (novo e legado)
+  // ✅ case-insensitive (Postgres)
   return {
     NOT: {
       OR: [
-        { category: "Estoque" },
-        { recurringGroupId: { startsWith: "ESTOQUE:" } },
-        { name: { startsWith: "Compra de material" } },
-        { name: { startsWith: "Compra de estoque" } },
+        { category: { equals: "Estoque", mode: "insensitive" } },
+        { recurringGroupId: { startsWith: "ESTOQUE:", mode: "insensitive" } },
+        { name: { startsWith: "Compra de material", mode: "insensitive" } },
+        { name: { startsWith: "Compra de estoque", mode: "insensitive" } },
       ],
     },
   };
@@ -471,7 +472,7 @@ async function payablesByMonth(req, res) {
       },
     }),
 
-    // ✅ custos gerais do mês (SEM estoque, pega também legado)
+    // ✅ custos gerais do mês (SEM estoque)
     prisma.cost.findMany({
       where: {
         salonId,
@@ -537,7 +538,10 @@ async function payablesByMonth(req, res) {
       paidCents: totalPaidCents,
       openCents: Math.max(0, totalExpectedCents - totalPaidCents),
     },
+
+    // ✅ compat: os dois nomes
     installments: items,
+    items,
   });
 }
 
@@ -655,7 +659,7 @@ async function listTransactions(req, res) {
   }));
 
   // --------------------
-  // 2) Se não for ALL, devolve só MANUAL (como já é hoje)
+  // 2) Se não for ALL, devolve só MANUAL
   // --------------------
   if (include !== "all") {
     return res.json({ transactions: parsedManual });
@@ -664,6 +668,7 @@ async function listTransactions(req, res) {
   // --------------------
   // 3) ALL = junta tudo que mexe no caixa no período
   //    (custos + recebíveis pagos + pagáveis pagos + manual)
+  //    ✅ aqui é onde estava entrando o "valor cheio" do estoque
   // --------------------
   const [recvPaid, payPaid, costs] = await Promise.all([
     prisma.receivableInstallment.findMany({
@@ -708,8 +713,13 @@ async function listTransactions(req, res) {
       },
     }),
 
+    // ✅ CORREÇÃO: filtrar custos de estoque aqui também
     prisma.cost.findMany({
-      where: { salonId, occurredAt: { gte: from, lt: to } },
+      where: {
+        salonId,
+        occurredAt: { gte: from, lt: to },
+        ...nonStockCostsWhere(),
+      },
       select: {
         id: true,
         occurredAt: true,
