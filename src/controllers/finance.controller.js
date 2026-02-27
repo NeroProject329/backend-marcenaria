@@ -285,8 +285,8 @@ async function payablesMonth(req, res) {
 }
 
 async function sumCosts({ salonId, from, to }) {
-  // Custos (fixo/variável): saída por occurredAt
-  // ✅ IMPORTANTe: ignora "Estoque" (estoque deve refletir via PAYABLE)
+  // ✅ Custos gerais (fixo/variável) por occurredAt
+  // ❌ Ignora "Estoque" porque estoque deve refletir via PayableInstallment
   const agg = await prisma.cost.aggregate({
     where: {
       salonId,
@@ -425,7 +425,6 @@ async function receivablesByMonth(req, res) {
 }
 
 
-// ✅ NOVO: GET /api/finance/payables/month?month=YYYY-MM
 async function payablesByMonth(req, res) {
   const { salonId } = req.user;
   const month = String(req.query.month || "").trim();
@@ -434,7 +433,10 @@ async function payablesByMonth(req, res) {
 
   const [installments, costs] = await Promise.all([
     prisma.payableInstallment.findMany({
-      where: { payable: { salonId }, dueDate: { gte: range.from, lt: range.to } },
+      where: {
+        payable: { salonId },
+        dueDate: { gte: range.from, lt: range.to },
+      },
       orderBy: [{ dueDate: "asc" }, { number: "asc" }],
       select: {
         id: true,
@@ -455,7 +457,7 @@ async function payablesByMonth(req, res) {
       },
     }),
 
-    // ✅ custos gerais do mês (ignora Estoque pra não duplicar com PAYABLE)
+    // ✅ custos gerais do mês (ignora Estoque)
     prisma.cost.findMany({
       where: {
         salonId,
