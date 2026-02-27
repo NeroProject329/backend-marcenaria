@@ -693,10 +693,10 @@ async function createMovement(req, res) {
 
         const method = p.method ? String(p.method).toUpperCase() : null;
         const paidNow =
-          p.paidNow === true ||
-          p.paidNow === 1 ||
-          p.paidNow === "1" ||
-          String(p.paidNow || "").toLowerCase() === "true";
+        p.paidNow === true ||
+        p.paidNow === 1 ||
+        p.paidNow === "1" ||
+        String(p.paidNow || "").toLowerCase() === "true";
 
         const description =
           (p.description || "").trim() ||

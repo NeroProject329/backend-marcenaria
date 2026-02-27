@@ -28,6 +28,20 @@ function dayKeyLocal(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+function nonStockCostsWhere() {
+  // Exclui qualquer custo gerado por compra de estoque (novo e legado)
+  return {
+    NOT: {
+      OR: [
+        { category: "Estoque" },
+        { recurringGroupId: { startsWith: "ESTOQUE:" } },
+        { name: { startsWith: "Compra de material" } },
+        { name: { startsWith: "Compra de estoque" } },
+      ],
+    },
+  };
+}
+
 // --------------------
 // 1) SUMMARY (mantém como está hoje)
 // --------------------
@@ -213,7 +227,6 @@ async function payablesMonth(req, res) {
   const from = new Date(Date.UTC(yy, mm - 1, 1));
   const to = new Date(Date.UTC(yy, mm, 1));
 
-  // 1) Parcelas de PAYABLE (fornecedor / compra parcelada etc)
   const inst = await prisma.payableInstallment.findMany({
     where: {
       dueDate: { gte: from, lt: to },
@@ -226,7 +239,7 @@ async function payablesMonth(req, res) {
           id: true,
           description: true,
           supplier: { select: { id: true, name: true, phone: true } },
-          installments: { select: { id: true } }, // pra contar total de parcelas
+          installments: { select: { id: true } },
         },
       },
     },
@@ -247,10 +260,13 @@ async function payablesMonth(req, res) {
     method: i.method,
   }));
 
-  // (Opcional) se você quiser também jogar “custos do mês” aqui,
-  // faça isso, mas RECOMENDO ignorar category="Estoque" pra não duplicar com PAYABLE:
+  // custos gerais do mês (SEM estoque)
   const costs = await prisma.cost.findMany({
-    where: { salonId, yearMonth: month, NOT: { category: "Estoque" } },
+    where: {
+  salonId,
+  occurredAt: { gte: from, lt: to },
+  ...nonStockCostsWhere(),
+},
     select: {
       id: true,
       name: true,
@@ -272,7 +288,7 @@ async function payablesMonth(req, res) {
     installmentsCount: null,
     dueDate: c.occurredAt,
     amountCents: c.amountCents,
-    status: "PENDENTE", // ou null
+    status: "PENDENTE",
     paidAt: null,
     method: null,
   }));
@@ -285,16 +301,17 @@ async function payablesMonth(req, res) {
 }
 
 async function sumCosts({ salonId, from, to }) {
-  // ✅ Custos gerais (fixo/variável) por occurredAt
-  // ❌ Ignora "Estoque" porque estoque deve refletir via PayableInstallment
+  // Custos gerais (fixo/variável) por occurredAt
+  // Ignora qualquer custo ligado a estoque (estoque deve refletir via PayableInstallment)
   const agg = await prisma.cost.aggregate({
     where: {
       salonId,
       occurredAt: { gte: from, lt: to },
-      NOT: { category: "Estoque" },
+      ...nonStockCostsWhere(),
     },
     _sum: { amountCents: true },
   });
+
   return agg._sum.amountCents || 0;
 }
 
@@ -433,10 +450,7 @@ async function payablesByMonth(req, res) {
 
   const [installments, costs] = await Promise.all([
     prisma.payableInstallment.findMany({
-      where: {
-        payable: { salonId },
-        dueDate: { gte: range.from, lt: range.to },
-      },
+      where: { payable: { salonId }, dueDate: { gte: range.from, lt: range.to } },
       orderBy: [{ dueDate: "asc" }, { number: "asc" }],
       select: {
         id: true,
@@ -451,18 +465,18 @@ async function payablesByMonth(req, res) {
             id: true,
             description: true,
             supplier: { select: { id: true, name: true, phone: true } },
-            installments: { select: { id: true } }, // pra contar total
+            installments: { select: { id: true } },
           },
         },
       },
     }),
 
-    // ✅ custos gerais do mês (ignora Estoque)
+    // ✅ custos gerais do mês (SEM estoque, pega também legado)
     prisma.cost.findMany({
       where: {
         salonId,
         occurredAt: { gte: range.from, lt: range.to },
-        NOT: { category: "Estoque" },
+        ...nonStockCostsWhere(),
       },
       orderBy: { occurredAt: "asc" },
       select: {
@@ -502,8 +516,8 @@ async function payablesByMonth(req, res) {
     installmentsCount: null,
     dueDate: c.occurredAt,
     amountCents: c.amountCents,
-    status: "PAGO",
-    paidAt: c.occurredAt,
+    status: "PENDENTE",
+    paidAt: null,
     method: null,
   }));
 
