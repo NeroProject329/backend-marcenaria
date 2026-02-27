@@ -30,7 +30,7 @@ function dayKeyLocal(d) {
 
 function nonStockCostsWhere() {
   // Exclui qualquer custo gerado por compra de estoque (novo e legado)
-  // ✅ case-insensitive (Postgres)
+  // Postgres: use mode:"insensitive" para não tomar “Estoque/ESTOQUE/estoque”
   return {
     NOT: {
       OR: [
@@ -302,8 +302,6 @@ async function payablesMonth(req, res) {
 }
 
 async function sumCosts({ salonId, from, to }) {
-  // Custos gerais (fixo/variável) por occurredAt
-  // Ignora qualquer custo ligado a estoque (estoque deve refletir via PayableInstallment)
   const agg = await prisma.cost.aggregate({
     where: {
       salonId,
@@ -714,7 +712,7 @@ async function listTransactions(req, res) {
     }),
 
     // ✅ CORREÇÃO: filtrar custos de estoque aqui também
-    prisma.cost.findMany({
+       prisma.cost.findMany({
       where: {
         salonId,
         occurredAt: { gte: from, lt: to },

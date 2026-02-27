@@ -567,6 +567,7 @@ async function listMovements(req, res) {
 }
 
 // POST /api/materials/movements
+// POST /api/materials/movements
 async function createMovement(req, res) {
   const { salonId } = req.user;
 
@@ -633,11 +634,7 @@ async function createMovement(req, res) {
     }
 
     const supplier = await prisma.client.findFirst({
-      where: {
-        id: supId,
-        salonId,
-        OR: [{ type: "FORNECEDOR" }, { type: "BOTH" }],
-      },
+      where: { id: supId, salonId, OR: [{ type: "FORNECEDOR" }, { type: "BOTH" }] },
       select: { id: true },
     });
     if (!supplier) return res.status(400).json({ message: "Fornecedor inválido." });
@@ -656,7 +653,7 @@ async function createMovement(req, res) {
   const installmentsCountNum = Number(p?.installmentsCount || 0);
   const inferredWantPayable =
     !!p &&
-    (Number.isFinite(installmentsCountNum) && installmentsCountNum >= 1 ||
+    ((Number.isFinite(installmentsCountNum) && installmentsCountNum >= 1) ||
       !!p.firstDueDate ||
       !!p.method ||
       p.paidNow === true ||
@@ -676,9 +673,7 @@ async function createMovement(req, res) {
     const result = await prisma.$transaction(async (tx) => {
       let payableId = null;
 
-      // =========================
       // 1) cria PAYABLE + parcelas (opcional)
-      // =========================
       if (wantPayable) {
         const totalCents = Math.round(qtyN * unitCents);
 
@@ -686,21 +681,19 @@ async function createMovement(req, res) {
         const installmentsCount = Math.max(1, Math.min(48, countRes.ok ? countRes.value : 1));
 
         const firstDueRes = toDate(p.firstDueDate, "firstDueDate");
-        if (!firstDueRes.ok) {
-          throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
-        }
+        if (!firstDueRes.ok) throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
         const firstDue = firstDueRes.value || occurredAtDt;
 
         const method = p.method ? String(p.method).toUpperCase() : null;
+
         const paidNow =
-        p.paidNow === true ||
-        p.paidNow === 1 ||
-        p.paidNow === "1" ||
-        String(p.paidNow || "").toLowerCase() === "true";
+          p.paidNow === true ||
+          p.paidNow === 1 ||
+          p.paidNow === "1" ||
+          String(p.paidNow || "").toLowerCase() === "true";
 
         const description =
-          (p.description || "").trim() ||
-          `Compra de estoque: ${mat.name}${nf ? ` • NF ${nf}` : ""}`;
+          (p.description || "").trim() || `Compra de estoque: ${mat.name}${nf ? ` • NF ${nf}` : ""}`;
 
         const installments = buildPayableInstallments({
           totalCents,
@@ -725,9 +718,7 @@ async function createMovement(req, res) {
         payableId = createdPayable.id;
       }
 
-      // =========================
       // 2) cria MOVEMENT (linka payableId se existir)
-      // =========================
       const created = await tx.materialMovement.create({
         data: {
           salonId,
@@ -745,18 +736,39 @@ async function createMovement(req, res) {
         include: {
           material: { select: { id: true, name: true, unit: true } },
           supplier: { select: { id: true, name: true, phone: true } },
-          payable: payableId ? { select: { id: true, description: true, totalCents: true } } : false,
+
+          // ✅ AGORA você “enxerga” as parcelas no retorno
+          payable: payableId
+            ? {
+                select: {
+                  id: true,
+                  description: true,
+                  totalCents: true,
+                  supplier: { select: { id: true, name: true, phone: true } },
+                  installments: {
+                    orderBy: { number: "asc" },
+                    select: {
+                      id: true,
+                      number: true,
+                      dueDate: true,
+                      amountCents: true,
+                      status: true,
+                      paidAt: true,
+                      method: true,
+                    },
+                  },
+                },
+              }
+            : false,
         },
       });
 
-      // =========================
       // 3) COST (apenas quando NÃO houver payable)
-      // =========================
       if (type === "IN" && !wantPayable) {
         const amountCents = Math.round(qtyN * unitCents);
         const yearMonth = monthKeyFromDate(occurredAtDt);
-
         const descKey = `ESTOQUE:${supId}:${nf || "-"}:${mat.name}`;
+
         await tx.cost.create({
           data: {
             salonId,
@@ -779,9 +791,7 @@ async function createMovement(req, res) {
 
     return res.status(201).json({ movement: result });
   } catch (e) {
-    if (e && e.statusCode === 400) {
-      return res.status(400).json({ message: e.message });
-    }
+    if (e && e.statusCode === 400) return res.status(400).json({ message: e.message });
     console.error("createMovement error:", e);
     return res.status(500).json({ message: "Erro ao criar movimentação." });
   }
