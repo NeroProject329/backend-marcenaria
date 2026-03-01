@@ -492,14 +492,26 @@ async function listMovements(req, res) {
         include: {
           material: true,
           supplier: true,
-          payable: {
-            select: {
-              id: true,
-              description: true,
-              totalCents: true,
-              installments: { select: { id: true } }, // só pra você "ver" que existem
-            },
-          },
+         payable: {
+  select: {
+    id: true,
+    description: true,
+    totalCents: true,
+    supplier: { select: { id: true, name: true, phone: true } },
+    installments: {
+      orderBy: { number: "asc" },
+      select: {
+        id: true,
+        number: true,
+        dueDate: true,
+        amountCents: true,
+        status: true,
+        paidAt: true,
+        method: true,
+      },
+    },
+  },
+},
         },
         orderBy: { occurredAt: "desc" },
         skip,
@@ -561,13 +573,25 @@ async function listMovements(req, res) {
         material: true,
         supplier: true,
         payable: {
-          select: {
-            id: true,
-            description: true,
-            totalCents: true,
-            installments: { select: { id: true } },
-          },
-        },
+  select: {
+    id: true,
+    description: true,
+    totalCents: true,
+    supplier: { select: { id: true, name: true, phone: true } },
+    installments: {
+      orderBy: { number: "asc" },
+      select: {
+        id: true,
+        number: true,
+        dueDate: true,
+        amountCents: true,
+        status: true,
+        paidAt: true,
+        method: true,
+      },
+    },
+  },
+},
       },
       orderBy: { occurredAt: "desc" },
     });
@@ -687,26 +711,19 @@ async function createMovement(req, res) {
       let payableId = null;
 
       // 1) cria PAYABLE + parcelas (opcional)
-      if (wantPayable) {
+if (wantPayable) {
   const totalCents = Math.round(qtyN * unitCents);
 
-  // installmentsCount: garante inteiro e limites
   const countRes = toInt(p.installmentsCount ?? 1, "installmentsCount");
-  let installmentsCount = countRes.ok ? countRes.value : 1;
-  installmentsCount = Math.max(1, Math.min(48, installmentsCount));
+  const installmentsCount = Math.max(1, Math.min(48, countRes.ok ? countRes.value : 1));
 
-  // ✅ firstDue vindo de qualquer nome (blindado)
-  const firstDueRaw =
-    p.firstDueDate ||
-    p.firstDueDateISO ||
-    p.firstDue ||
-    p.firstDueAt ||
-    null;
+  // ✅ aceita vários nomes vindos do front (pra não quebrar)
+  const firstDueRaw = p.firstDueDate || p.firstDueDateISO || p.firstDue || null;
 
   const firstDueRes = toDate(firstDueRaw, "firstDueDate");
-  if (!firstDueRes.ok) throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
-
-  // se não vier, cai no occurredAtDt (ok para AVISTA, mas no parcelado o front já manda)
+  if (!firstDueRes.ok) {
+    throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
+  }
   const firstDue = firstDueRes.value || occurredAtDt;
 
   const method = p.method ? String(p.method).toUpperCase() : null;
@@ -717,15 +734,6 @@ async function createMovement(req, res) {
     p.paidNow === "1" ||
     String(p.paidNow || "").toLowerCase() === "true";
 
-  // ✅ regra de negócio: se parcelado, mínimo 2
-  // (se alguém mandar errado, backend garante)
-  if (!paidNow && installmentsCount === 1 && String(p.mode || "").toUpperCase() === "PARCELADO") {
-    installmentsCount = 2;
-  }
-
-  // ✅ se paidNow=true, faz sentido só quando 1x
-  const finalPaidNow = installmentsCount === 1 ? paidNow : false;
-
   const description =
     (p.description || "").trim() ||
     `Compra de estoque: ${mat.name}${nf ? ` • NF ${nf}` : ""}`;
@@ -735,7 +743,7 @@ async function createMovement(req, res) {
     count: installmentsCount,
     firstDueDate: firstDue,
     method,
-    paidNow: finalPaidNow,
+    paidNow,
     paidAt: occurredAtDt,
   });
 
