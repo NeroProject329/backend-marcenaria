@@ -688,49 +688,70 @@ async function createMovement(req, res) {
 
       // 1) cria PAYABLE + parcelas (opcional)
       if (wantPayable) {
-        const totalCents = Math.round(qtyN * unitCents);
+  const totalCents = Math.round(qtyN * unitCents);
 
-        const countRes = toInt(p.installmentsCount ?? 1, "installmentsCount");
-        const installmentsCount = Math.max(1, Math.min(48, countRes.ok ? countRes.value : 1));
+  // installmentsCount: garante inteiro e limites
+  const countRes = toInt(p.installmentsCount ?? 1, "installmentsCount");
+  let installmentsCount = countRes.ok ? countRes.value : 1;
+  installmentsCount = Math.max(1, Math.min(48, installmentsCount));
 
-        const firstDueRes = toDate(p.firstDueDate, "firstDueDate");
-        if (!firstDueRes.ok) throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
-        const firstDue = firstDueRes.value || occurredAtDt;
+  // ✅ firstDue vindo de qualquer nome (blindado)
+  const firstDueRaw =
+    p.firstDueDate ||
+    p.firstDueDateISO ||
+    p.firstDue ||
+    p.firstDueAt ||
+    null;
 
-        const method = p.method ? String(p.method).toUpperCase() : null;
+  const firstDueRes = toDate(firstDueRaw, "firstDueDate");
+  if (!firstDueRes.ok) throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
 
-        const paidNow =
-          p.paidNow === true ||
-          p.paidNow === 1 ||
-          p.paidNow === "1" ||
-          String(p.paidNow || "").toLowerCase() === "true";
+  // se não vier, cai no occurredAtDt (ok para AVISTA, mas no parcelado o front já manda)
+  const firstDue = firstDueRes.value || occurredAtDt;
 
-        const description =
-          (p.description || "").trim() || `Compra de estoque: ${mat.name}${nf ? ` • NF ${nf}` : ""}`;
+  const method = p.method ? String(p.method).toUpperCase() : null;
 
-        const installments = buildPayableInstallments({
-          totalCents,
-          count: installmentsCount,
-          firstDueDate: firstDue,
-          method,
-          paidNow,
-          paidAt: occurredAtDt,
-        });
+  const paidNow =
+    p.paidNow === true ||
+    p.paidNow === 1 ||
+    p.paidNow === "1" ||
+    String(p.paidNow || "").toLowerCase() === "true";
 
-        const createdPayable = await tx.payable.create({
-          data: {
-            salonId,
-            supplierId: supId,
-            description,
-            totalCents,
-            installments: { create: installments },
-          },
-          select: { id: true },
-        });
+  // ✅ regra de negócio: se parcelado, mínimo 2
+  // (se alguém mandar errado, backend garante)
+  if (!paidNow && installmentsCount === 1 && String(p.mode || "").toUpperCase() === "PARCELADO") {
+    installmentsCount = 2;
+  }
 
-        payableId = createdPayable.id;
-      }
+  // ✅ se paidNow=true, faz sentido só quando 1x
+  const finalPaidNow = installmentsCount === 1 ? paidNow : false;
 
+  const description =
+    (p.description || "").trim() ||
+    `Compra de estoque: ${mat.name}${nf ? ` • NF ${nf}` : ""}`;
+
+  const installments = buildPayableInstallments({
+    totalCents,
+    count: installmentsCount,
+    firstDueDate: firstDue,
+    method,
+    paidNow: finalPaidNow,
+    paidAt: occurredAtDt,
+  });
+
+  const createdPayable = await tx.payable.create({
+    data: {
+      salonId,
+      supplierId: supId,
+      description,
+      totalCents,
+      installments: { create: installments },
+    },
+    select: { id: true },
+  });
+
+  payableId = createdPayable.id;
+}
       // 2) cria MOVEMENT (linka payableId se existir)
       const created = await tx.materialMovement.create({
         data: {

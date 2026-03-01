@@ -216,6 +216,30 @@ async function sumPayablesPaid({ salonId, from, to }) {
   return agg._sum.amountCents || 0;
 }
 
+async function sumReceivablesDue({ salonId, from, to }) {
+  const agg = await prisma.receivableInstallment.aggregate({
+    where: {
+      receivable: { salonId },
+      dueDate: { gte: from, lt: to },
+      status: { not: "CANCELADO" },
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function sumPayablesDue({ salonId, from, to }) {
+  const agg = await prisma.payableInstallment.aggregate({
+    where: {
+      payable: { salonId },
+      dueDate: { gte: from, lt: to },
+      status: { not: "CANCELADO" },
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
 async function payablesMonth(req, res) {
   const { salonId } = req.user;
   const { month } = req.query; // "YYYY-MM"
@@ -314,18 +338,25 @@ async function sumCosts({ salonId, from, to }) {
   return agg._sum.amountCents || 0;
 }
 
-async function calcCashflow({ salonId, from, to }) {
+async function calcCashflow({ salonId, from, to, basis = "paid" }) {
   // Entradas
   const legacyAutoIn = await sumLegacyAutoInAppointments({ salonId, from, to });
-  const receivablesIn = await sumReceivablesPaid({ salonId, from, to });
   const { manualIn, manualOut } = await sumManualTx({ salonId, from, to });
+
+  const receivablesIn =
+    basis === "due"
+      ? await sumReceivablesDue({ salonId, from, to })
+      : await sumReceivablesPaid({ salonId, from, to });
 
   const inCents = legacyAutoIn + receivablesIn + manualIn;
 
   // Saídas
-  const payablesOut = await sumPayablesPaid({ salonId, from, to });
-  const costsOut = await sumCosts({ salonId, from, to });
+  const payablesOut =
+    basis === "due"
+      ? await sumPayablesDue({ salonId, from, to })
+      : await sumPayablesPaid({ salonId, from, to });
 
+  const costsOut = await sumCosts({ salonId, from, to }); // já exclui estoque pelo nonStockCostsWhere()
   const outCents = manualOut + payablesOut + costsOut;
 
   return {
@@ -333,6 +364,7 @@ async function calcCashflow({ salonId, from, to }) {
     outCents,
     balanceCents: inCents - outCents,
     breakdown: {
+      basis,
       legacyAutoInCents: legacyAutoIn,
       receivablesInCents: receivablesIn,
       manualInCents: manualIn,
