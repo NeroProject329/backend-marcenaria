@@ -446,7 +446,7 @@ async function deleteMaterial(req, res) {
 // --------------------
 // Movements (Real control)
 // --------------------
-// GET /api/materials/movements?month=YYYY-MM
+// GET /api/materials/movements?month=YYYY-MM&view=movements|all
 async function listMovements(req, res) {
   try {
     const { salonId } = req.user;
@@ -460,12 +460,15 @@ async function listMovements(req, res) {
       to,
       limit = "50",
       offset = "0",
+      view = "movements", // ✅ novo
     } = req.query;
 
     const take = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     const skip = Math.max(parseInt(offset, 10) || 0, 0);
 
-    // ✅ MODO: histórico por material
+    // ============================
+    // MODO: histórico por material
+    // ============================
     if (materialId) {
       const where = { salonId, materialId };
 
@@ -492,26 +495,26 @@ async function listMovements(req, res) {
         include: {
           material: true,
           supplier: true,
-         payable: {
-  select: {
-    id: true,
-    description: true,
-    totalCents: true,
-    supplier: { select: { id: true, name: true, phone: true } },
-    installments: {
-      orderBy: { number: "asc" },
-      select: {
-        id: true,
-        number: true,
-        dueDate: true,
-        amountCents: true,
-        status: true,
-        paidAt: true,
-        method: true,
-      },
-    },
-  },
-},
+          payable: {
+            select: {
+              id: true,
+              description: true,
+              totalCents: true,
+              supplier: { select: { id: true, name: true, phone: true } },
+              installments: {
+                orderBy: { number: "asc" },
+                select: {
+                  id: true,
+                  number: true,
+                  dueDate: true,
+                  amountCents: true,
+                  status: true,
+                  paidAt: true,
+                  method: true,
+                },
+              },
+            },
+          },
         },
         orderBy: { occurredAt: "desc" },
         skip,
@@ -521,14 +524,19 @@ async function listMovements(req, res) {
       return res.json({ movements, total, limit: take, offset: skip });
     }
 
-    // ✅ MODO: lista do mês
+    // ============================
+    // MODO: lista do mês
+    // ============================
     if (!month) {
-      return res.status(400).json({ error: "month é obrigatório (ex: 2026-01) quando materialId não for enviado." });
+      return res
+        .status(400)
+        .json({ error: "month é obrigatório (ex: 2026-01) quando materialId não for enviado." });
     }
 
     const range = parseMonthRange(month);
     if (!range) return res.status(400).json({ error: "month inválido (use YYYY-MM)." });
 
+    // 1) Movements do mês (por occurredAt)
     const where = {
       salonId,
       occurredAt: { gte: range.start, lt: range.end },
@@ -546,57 +554,145 @@ async function listMovements(req, res) {
       ];
     }
 
-    if (from || to) {
-      where.occurredAt = {};
-      if (from) {
-        const d = new Date(from);
-        d.setHours(0, 0, 0, 0);
-        where.occurredAt.gte = d;
-      } else {
-        where.occurredAt.gte = range.start;
-      }
-
-      if (to) {
-        const d = new Date(to);
-        d.setHours(23, 59, 59, 999);
-        where.occurredAt.lte = d;
-      } else {
-        const d = new Date(range.end);
-        d.setMilliseconds(d.getMilliseconds() - 1);
-        where.occurredAt.lte = d;
-      }
-    }
-
     const movements = await prisma.materialMovement.findMany({
       where,
       include: {
         material: true,
         supplier: true,
         payable: {
-  select: {
-    id: true,
-    description: true,
-    totalCents: true,
-    supplier: { select: { id: true, name: true, phone: true } },
-    installments: {
-      orderBy: { number: "asc" },
+          select: {
+            id: true,
+            description: true,
+            totalCents: true,
+            supplier: { select: { id: true, name: true, phone: true } },
+            installments: {
+              orderBy: { number: "asc" },
+              select: {
+                id: true,
+                number: true,
+                dueDate: true,
+                amountCents: true,
+                status: true,
+                paidAt: true,
+                method: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { occurredAt: "desc" },
+    });
+
+    // Se for só "movements", devolve como sempre
+    if (String(view || "").toLowerCase() !== "all") {
+      return res.json({ movements });
+    }
+
+    // 2) Parcelas que vencem no mês (por dueDate) — somente as que pertencem a movimentos de estoque
+    const inst = await prisma.payableInstallment.findMany({
+      where: {
+        dueDate: { gte: range.start, lt: range.end },
+        payable: { salonId },
+      },
+      orderBy: [{ dueDate: "asc" }, { number: "asc" }],
       select: {
         id: true,
+        payableId: true,
         number: true,
         dueDate: true,
         amountCents: true,
         status: true,
         paidAt: true,
         method: true,
+        payable: {
+          select: {
+            id: true,
+            description: true,
+            totalCents: true,
+            supplier: { select: { id: true, name: true, phone: true } },
+            installments: { select: { id: true } },
+          },
+        },
       },
-    },
-  },
-},
-      },
-      orderBy: { occurredAt: "desc" },
     });
 
-    return res.json({ movements });
+    const payableIds = Array.from(new Set(inst.map((i) => i.payableId))).filter(Boolean);
+
+    // busca movements ligados a esses payables
+    const linkedMoves = payableIds.length
+      ? await prisma.materialMovement.findMany({
+          where: { salonId, payableId: { in: payableIds } },
+          select: {
+            payableId: true,
+            materialId: true,
+            qty: true,
+            unitCostCents: true,
+            occurredAt: true,
+            notes: true,
+            nfNumber: true,
+            supplierId: true,
+            supplier: { select: { id: true, name: true, phone: true } },
+            material: { select: { id: true, name: true, unit: true } },
+          },
+        })
+      : [];
+
+    const mvByPayable = new Map();
+    for (const mv of linkedMoves) {
+      if (!mvByPayable.has(mv.payableId)) mvByPayable.set(mv.payableId, mv);
+    }
+
+    const installmentRows = inst
+      .map((i) => {
+        const mv = mvByPayable.get(i.payableId);
+        if (!mv) return null; // ✅ não é estoque (não tem movement ligado)
+
+        return {
+          id: i.id,
+          kind: "INSTALLMENT",
+          // mantém IN pra passar no filtro do front sem quebrar
+          type: "IN",
+          occurredAt: i.dueDate,
+
+          materialId: mv.materialId,
+          material: mv.material,
+          supplierId: mv.supplierId,
+          supplier: mv.supplier,
+          nfNumber: mv.nfNumber,
+          notes: mv.notes,
+
+          // para o front não calcular total por qty*unit
+          qty: 0,
+          unitCostCents: 0,
+          totalCents: i.amountCents,
+
+          payable: {
+            id: i.payable?.id || i.payableId,
+            description: i.payable?.description || "Compra de estoque",
+            totalCents: i.payable?.totalCents || null,
+            supplier: i.payable?.supplier || null,
+            installmentsCount: i.payable?.installments?.length || null,
+          },
+
+          installment: {
+            id: i.id,
+            number: i.number,
+            dueDate: i.dueDate,
+            amountCents: i.amountCents,
+            status: i.status,
+            paidAt: i.paidAt,
+            method: i.method,
+          },
+        };
+      })
+      .filter(Boolean);
+
+    // 3) junta tudo
+    const merged = [...movements, ...installmentRows].sort(
+      (a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime()
+    );
+
+    return res.json({ movements: merged });
   } catch (err) {
     console.error("listMovements error:", err);
     return res.status(500).json({ error: "Erro ao listar movimentações." });
@@ -710,29 +806,31 @@ async function createMovement(req, res) {
     const result = await prisma.$transaction(async (tx) => {
       let payableId = null;
 
-      // 1) cria PAYABLE + parcelas (opcional)
+// 1) cria PAYABLE + parcelas (opcional)
 if (wantPayable) {
   const totalCents = Math.round(qtyN * unitCents);
 
   const countRes = toInt(p.installmentsCount ?? 1, "installmentsCount");
-  const installmentsCount = Math.max(1, Math.min(48, countRes.ok ? countRes.value : 1));
+  const rawCount = countRes.ok ? countRes.value : 1;
+  const installmentsCount = Math.max(1, Math.min(48, rawCount));
 
-  // ✅ aceita vários nomes vindos do front (pra não quebrar)
+  // aceita vários nomes vindos do front
   const firstDueRaw = p.firstDueDate || p.firstDueDateISO || p.firstDue || null;
 
-  const firstDueRes = toDate(firstDueRaw, "firstDueDate");
-  if (!firstDueRes.ok) {
-    throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
-  }
+  const firstDueRes = toDate(firstDueRaw || occurredAtDt, "firstDueDate");
+  if (!firstDueRes.ok) throw Object.assign(new Error(firstDueRes.message), { statusCode: 400 });
   const firstDue = firstDueRes.value || occurredAtDt;
 
   const method = p.method ? String(p.method).toUpperCase() : null;
 
-  const paidNow =
+  // paidNow só faz sentido quando é 1x
+  const paidNowFlag =
     p.paidNow === true ||
     p.paidNow === 1 ||
     p.paidNow === "1" ||
     String(p.paidNow || "").toLowerCase() === "true";
+
+  const paidNow = installmentsCount === 1 ? paidNowFlag : false;
 
   const description =
     (p.description || "").trim() ||
@@ -901,6 +999,7 @@ async function materialsSummary(req, res) {
   const range = parseMonthRange(month);
   if (!range) return res.status(400).json({ message: "month inválido (use YYYY-MM)." });
 
+  // 1) Movements do mês (por occurredAt)
   const movements = await prisma.materialMovement.findMany({
     where: {
       salonId,
@@ -908,57 +1007,110 @@ async function materialsSummary(req, res) {
     },
     include: {
       material: { select: { id: true, name: true, unit: true } },
+      payable: { select: { id: true } }, // só pra saber se tem payable
     },
     orderBy: [{ occurredAt: "asc" }],
   });
 
-  // Total gasto (compras): soma de IN (qty * unitCostCents)
-  let totalInCents = 0;
+  // total compra (valor cheio, informativo)
+  let totalPurchaseInCents = 0;
+
+  // total “pagamentos do mês” (o que você quer como gasto do mês)
+  let totalPaymentsInCents = 0;
+
+  // Consumo (OUT) continua como estava (hoje dá 0 pq unitCostCents no OUT é 0)
   let totalOutCents = 0;
 
-  const byMaterial = new Map(); // materialId -> stats
-  for (const mv of movements) {
-    const totalCents = Math.round((mv.qty || 0) * (mv.unitCostCents || 0));
+  // agrupamento por material (para o top)
+  const byMaterial = new Map();
 
-    if (mv.type === "IN") totalInCents += totalCents;
-    if (mv.type === "OUT") totalOutCents += totalCents;
-
-    const mid = mv.materialId;
+  function addMat(material, addQty, addCents) {
+    const mid = material?.id || "unknown";
     const cur = byMaterial.get(mid) || {
       materialId: mid,
-      name: mv.material?.name || "-",
-      unit: mv.material?.unit || "UN",
+      name: material?.name || "-",
+      unit: material?.unit || "UN",
       inQty: 0,
       inCents: 0,
       outQty: 0,
       outCents: 0,
-      adjustQty: 0,
-      adjustCents: 0,
     };
-
-    if (mv.type === "IN") {
-      cur.inQty += mv.qty;
-      cur.inCents += totalCents;
-    } else if (mv.type === "OUT") {
-      cur.outQty += mv.qty;
-      cur.outCents += totalCents;
-    } else {
-      cur.adjustQty += mv.qty;
-      cur.adjustCents += totalCents;
-    }
-
+    cur.inQty += addQty || 0;
+    cur.inCents += addCents || 0;
     byMaterial.set(mid, cur);
   }
 
-  const materials = Array.from(byMaterial.values()).sort((a, b) => b.inCents - a.inCents);
+  // 2) soma compras do mês (valor cheio)
+  for (const mv of movements) {
+    const totalCents = Math.round((mv.qty || 0) * (mv.unitCostCents || 0));
 
-  // top 10 por custo de compra no mês
+    if (mv.type === "IN") {
+      totalPurchaseInCents += totalCents;
+
+      // se NÃO tiver payable => compra “à vista” => entra como pagamento do mês também
+      if (!mv.payableId) {
+        totalPaymentsInCents += totalCents;
+        addMat(mv.material, Number(mv.qty || 0), totalCents);
+      }
+    }
+
+    if (mv.type === "OUT") {
+      totalOutCents += totalCents;
+      // (se quiser contabilizar consumo real, depois a gente evolui pra custo médio)
+    }
+  }
+
+  // 3) soma parcelas que VENCEM no mês (por dueDate), mas só as que são de estoque (tem movement ligado)
+  const installments = await prisma.payableInstallment.findMany({
+    where: {
+      dueDate: { gte: range.start, lt: range.end },
+      payable: { salonId },
+    },
+    select: {
+      id: true,
+      payableId: true,
+      amountCents: true,
+    },
+  });
+
+  const payableIds = Array.from(new Set(installments.map((i) => i.payableId))).filter(Boolean);
+
+  const linkedMoves = payableIds.length
+    ? await prisma.materialMovement.findMany({
+        where: { salonId, payableId: { in: payableIds } },
+        select: {
+          payableId: true,
+          material: { select: { id: true, name: true, unit: true } },
+        },
+      })
+    : [];
+
+  const mvByPayable = new Map();
+  for (const mv of linkedMoves) {
+    if (!mvByPayable.has(mv.payableId)) mvByPayable.set(mv.payableId, mv);
+  }
+
+  for (const inst of installments) {
+    const mv = mvByPayable.get(inst.payableId);
+    if (!mv) continue; // ✅ não é estoque
+
+    totalPaymentsInCents += Number(inst.amountCents || 0);
+    // qty=0 pra não inflar “Qtd (IN)” em todos os meses
+    addMat(mv.material, 0, Number(inst.amountCents || 0));
+  }
+
+  const materials = Array.from(byMaterial.values()).sort((a, b) => b.inCents - a.inCents);
   const topByCost = materials.slice(0, 10);
 
   return res.json({
     month,
     totals: {
-      totalInCents,
+      // ✅ mantém compat com front atual: "Gasto do mês" vira pagamentos do mês
+      totalInCents: totalPaymentsInCents,
+
+      // ✅ novo: compras do mês (valor cheio)
+      totalPurchaseInCents,
+
       totalOutCents,
     },
     topByCost,
