@@ -451,7 +451,7 @@ async function costSummary(req, res) {
     select: { type: true, amountCents: true },
   });
 
-  const fixedCents = costs
+ const fixedCents = costs
     .filter((c) => c.type === "FIXO")
     .reduce((a, c) => a + (c.amountCents || 0), 0);
 
@@ -460,12 +460,16 @@ async function costSummary(req, res) {
     .reduce((a, c) => a + (c.amountCents || 0), 0);
 
   const totalCents = fixedCents + variableCents;
+
+  // ✅ Mantém o dailyCents (total) por compatibilidade,
+  // mas expõe também o dailyFixedCents (FIXO / dias trabalhados)
   const dailyCents = Math.round(totalCents / workDays);
+  const dailyFixedCents = Math.round(fixedCents / workDays);
 
   return res.json({
     month,
     workDays,
-    totals: { fixedCents, variableCents, totalCents, dailyCents },
+    totals: { fixedCents, variableCents, totalCents, dailyCents, dailyFixedCents },
   });
 }
 
