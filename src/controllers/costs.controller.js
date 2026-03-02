@@ -46,26 +46,47 @@ function monthKeyFromDate(d) {
   return `${year}-${month}`;
 }
 
+function dayOfMonthSP(date) {
+  const dt = new Date(date);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    day: "2-digit",
+  }).formatToParts(dt);
+
+  const day = parts.find((p) => p.type === "day")?.value;
+  const n = Number(day);
+  return Number.isFinite(n) ? n : 1;
+}
+
+function buildDateForMonthSP(monthStr, dayOfMonth) {
+  const [y, m] = String(monthStr || "").split("-").map(Number);
+  if (!y || !m) return new Date(`${monthStr}-01T00:00:00-03:00`);
+
+  // último dia do mês (m é 1..12)
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const d = Math.max(1, Math.min(lastDay, Number(dayOfMonth) || 1));
+  const dd = String(d).padStart(2, "0");
+
+  // 00:00 no fuso SP (-03:00)
+  return new Date(`${monthStr}-${dd}T00:00:00-03:00`);
+}
+
 function monthStartUTC(monthStr) {
   const range = monthRange(monthStr);
   if (!range) return null;
+  // mantém (usado em outras partes), mas agora recorrência usa buildDateForMonthSP()
   return new Date(`${monthStr}-01T00:00:00-03:00`);
 }
 
 /**
  * ✅ Garante que TODOS custos recorrentes tenham um registro no month (YYYY-MM).
- * Regra:
- * - Para cada recurringGroupId, se não existir Cost no month, cria copiando o último valor conhecido (<= month).
- * - Edição em um mês só muda aquele mês. Meses futuros usam o “último conhecido” quando forem gerados.
+ * ✅ AGORA mantém o mesmo DIA do occurredAt (ex: aluguel dia 15 continua dia 15).
  */
 async function ensureRecurringMonth(salonId, month) {
   if (!monthRange(month)) return;
 
-  const monthStart = monthStartUTC(month);
-  if (!monthStart) return;
-
   await prisma.$transaction(async (tx) => {
-    // 1) Pega todos os custos recorrentes “historicamente” até o mês alvo
+    // 1) Pega o histórico recorrente até o mês alvo
     const recurringHistory = await tx.cost.findMany({
       where: {
         salonId,
@@ -84,20 +105,22 @@ async function ensureRecurringMonth(salonId, month) {
         category: true,
         amountCents: true,
         supplierId: true,
+        occurredAt: true, // ✅ precisamos disso pra manter o dia
       },
     });
 
-    // 2) Descobre o “último custo conhecido” de cada grupo
+    // 2) Último conhecido por grupo
     const lastByGroup = new Map();
     for (const c of recurringHistory) {
       const g = c.recurringGroupId;
       if (!g) continue;
-      if (!lastByGroup.has(g)) lastByGroup.set(g, c); // como tá orderBy desc, o primeiro é o mais recente
+      if (!lastByGroup.has(g)) lastByGroup.set(g, c);
     }
+
     const groups = Array.from(lastByGroup.keys());
     if (!groups.length) return;
 
-    // 3) Quais desses grupos já têm registro no mês?
+    // 3) Já existe no mês?
     const existingThisMonth = await tx.cost.findMany({
       where: {
         salonId,
@@ -108,13 +131,16 @@ async function ensureRecurringMonth(salonId, month) {
     });
     const hasSet = new Set(existingThisMonth.map((x) => x.recurringGroupId));
 
-    // 4) Cria os que faltam
+    // 4) Cria os que faltam mantendo o DIA do occurredAt do "base"
     const toCreate = [];
     for (const g of groups) {
       if (hasSet.has(g)) continue;
 
       const base = lastByGroup.get(g);
       if (!base) continue;
+
+      const dueDay = dayOfMonthSP(base.occurredAt);
+      const occurredAt = buildDateForMonthSP(month, dueDay);
 
       toCreate.push({
         salonId,
@@ -126,7 +152,7 @@ async function ensureRecurringMonth(salonId, month) {
         recurringGroupId: g,
         yearMonth: month,
         amountCents: base.amountCents,
-        occurredAt: monthStart,
+        occurredAt,
         supplierId: base.supplierId || null,
       });
     }
