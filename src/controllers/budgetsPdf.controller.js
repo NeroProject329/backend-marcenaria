@@ -26,17 +26,14 @@ function clipText(s, max = 140) {
   return t.length > max ? t.slice(0, max - 1).trim() + "…" : t;
 }
 
-// Se no front você estava “colando” o resumo interno no notes,
-// aqui a gente corta tudo que vier depois do separador (—) / “MATERIAIS”
+// corta “resumo interno” se existir no notes
 function clientNotes(raw) {
   if (!raw) return "";
   let s = String(raw);
 
-  // corta no separador usado no resumo
   const sep = s.indexOf("\n—");
   if (sep !== -1) s = s.slice(0, sep);
 
-  // corta em marcadores comuns do resumo
   const markers = ["RESUMO DO ORÇAMENTO", "MATERIAIS (por item):", "MATERIAIS:"];
   for (const m of markers) {
     const idx = s.indexOf(m);
@@ -97,7 +94,10 @@ function drawBar(doc, x, y, w, h, text, color) {
   doc.restore();
 }
 
-function drawField(doc, x, y, w, label, value) {
+// ✅ agora dá pra escolher alinhamento e fonte do valor
+function drawField(doc, x, y, w, label, value, opts = {}) {
+  const { align = "left", valueFontSize = 9 } = opts;
+
   doc.save();
 
   // label
@@ -106,6 +106,7 @@ function drawField(doc, x, y, w, label, value) {
   // value box
   const boxY = y + 10;
   const boxH = 16;
+
   doc
     .lineWidth(0.7)
     .strokeColor("#cfcfcf")
@@ -113,11 +114,16 @@ function drawField(doc, x, y, w, label, value) {
     .rect(x, boxY, w, boxH)
     .fillAndStroke();
 
-  doc
-    .fillColor("#111")
-    .fontSize(9)
-    .font("Helvetica")
-    .text(String(value ?? "-"), x + 6, boxY + 3, { width: w - 12 });
+  // value text
+  doc.fillColor("#111").font("Helvetica").fontSize(valueFontSize);
+
+  if (align === "center") {
+    doc.text(String(value ?? "-"), x, boxY + 3, { width: w, align: "center" });
+  } else if (align === "right") {
+    doc.text(String(value ?? "-"), x, boxY + 3, { width: w - 6, align: "right" });
+  } else {
+    doc.text(String(value ?? "-"), x + 6, boxY + 3, { width: w - 12, align: "left" });
+  }
 
   doc.restore();
 }
@@ -164,7 +170,6 @@ async function budgetPdf(req, res) {
   const doc = new PDFDocument({ size: "A4", margin: 0 });
   doc.pipe(res);
 
-  // ===== Tema / medidas =====
   const ORANGE = "#d85a2a";
   const BORDER = "#9f9f9f";
 
@@ -174,7 +179,7 @@ async function budgetPdf(req, res) {
   const h0 = 780;
   const pageBottom = y0 + h0;
 
-  // borda externa (igual “folha modelo”)
+  // borda externa
   doc.lineWidth(1).strokeColor(BORDER).rect(x0, y0, w0, h0).stroke();
 
   // ===== Cabeçalho =====
@@ -194,21 +199,11 @@ async function budgetPdf(req, res) {
       const buf = await fetchBuffer(salon.logoUrl);
       doc.image(buf, logoX, logoY, { fit: [logoSize, logoSize] });
     } catch {
-      // ignora se falhar
+      // ignora
     }
   }
 
-  // título central
-  doc
-    .fillColor("#111")
-    .font("Helvetica-Bold")
-    .fontSize(14)
-    .text(String(salon.name || "MARCENARIA").toUpperCase(), x0 + 80, headerY + 12, {
-      width: w0 - 170,
-      align: "center",
-    });
-
-  // box número orçamento (top right)
+  // box número orçamento
   const ref = String(budget.id).slice(-4).toUpperCase();
   const boxW = 88;
   const boxH = 36;
@@ -227,97 +222,136 @@ async function budgetPdf(req, res) {
     .fontSize(14)
     .text(ref, boxX, boxY + 16, { width: boxW, align: "center" });
 
-  // campos no cabeçalho (abaixo do box)
-  const hfY1 = headerY + 50;
-  drawField(doc, x0 + 80, hfY1, 160, "Telefone", salon.phone || "-");
-  drawField(doc, x0 + 80 + 170, hfY1, 120, "Data orçamento", fmtDate(budget.createdAt));
-  drawField(doc, x0 + 80 + 170 + 130, hfY1, 135, "Previsão entrega", fmtDate(budget.expectedDeliveryAt));
+  // ✅ título centralizado exatamente ENTRE logo e box
+  const titleLeft = x0 + 80;
+  const titleRight = boxX - 10;
+  const titleW = Math.max(200, titleRight - titleLeft);
 
-  drawField(
-    doc,
-    x0 + 80,
-    hfY1 + 30,
-    w0 - 90,
-    "Endereço",
-    salon.address || "-"
-  );
+  doc
+    .fillColor("#111")
+    .font("Helvetica-Bold")
+    .fontSize(14)
+    .text(String(salon.name || "MARCENARIA").toUpperCase(), titleLeft, headerY + 12, {
+      width: titleW,
+      align: "center",
+    });
+
+  // campos do cabeçalho
+  const hfY1 = headerY + 50;
+  const gap = 10;
+
+  const rowX = titleLeft;              // alinha com título
+  const rowRight = x0 + w0 - 10;       // deixa “respiro” na borda
+  const rowW = rowRight - rowX;
+
+  // distribuição bonitinha
+  const wTel = 200;
+  const wData = 140;
+  const wPrev = rowW - wTel - wData - gap * 2;
+
+  drawField(doc, rowX, hfY1, wTel, "Telefone", salon.phone || "-", { align: "center" });
+  drawField(doc, rowX + wTel + gap, hfY1, wData, "Data orçamento", fmtDate(budget.createdAt), { align: "center" });
+  drawField(doc, rowX + wTel + gap + wData + gap, hfY1, wPrev, "Previsão entrega", fmtDate(budget.expectedDeliveryAt), { align: "center" });
+
+  drawField(doc, rowX, hfY1 + 30, rowW, "Endereço", salon.address || "-", { align: "left" });
 
   // ===== CLIENTE =====
   const clientBarY = headerY + headerH + 12;
   drawBar(doc, x0, clientBarY, w0, 18, "CLIENTE", ORANGE);
 
   const cY = clientBarY + 26;
-  // linha 1: nome / cpf / telefone
-  const gap = 8;
+
   const wNome = 250;
   const wCpf = 120;
-  const wTel = w0 - wNome - wCpf - gap * 2;
+  const wTel2 = w0 - wNome - wCpf - gap * 2;
 
-  drawField(doc, x0, cY, wNome, "Nome", client.name || "-");
-  drawField(doc, x0 + wNome + gap, cY, wCpf, "CPF/CNPJ", client.cpf || "-");
-  drawField(doc, x0 + wNome + gap + wCpf + gap, cY, wTel, "Telefone", client.phone || "-");
+  drawField(doc, x0, cY, wNome, "Nome", client.name || "-", { align: "left" });
+  drawField(doc, x0 + wNome + gap, cY, wCpf, "CPF/CNPJ", client.cpf || "-", { align: "center" });
+  drawField(doc, x0 + wNome + gap + wCpf + gap, cY, wTel2, "Telefone", client.phone || "-", { align: "center" });
 
-  // linha 2: endereço / email
   const cY2 = cY + 38;
   const wAddr = 360;
   const wEmail = w0 - wAddr - gap;
 
-  drawField(doc, x0, cY2, wAddr, "Endereço", buildClientAddress(client));
-  drawField(doc, x0 + wAddr + gap, cY2, wEmail, "E-mail", client.email || "-");
+  drawField(doc, x0, cY2, wAddr, "Endereço", buildClientAddress(client), { align: "left" });
+
+  // ✅ e-mail: fonte menor + corta pra não quebrar feio
+  drawField(
+    doc,
+    x0 + wAddr + gap,
+    cY2,
+    wEmail,
+    "E-mail",
+    clipText(client.email || "-", 34),
+    { align: "center", valueFontSize: 8 }
+  );
 
   // ===== ORÇAMENTO =====
   const budgetBarY = cY2 + 52;
   drawBar(doc, x0, budgetBarY, w0, 18, "ORÇAMENTO", ORANGE);
 
-  // ===== Tabela itens =====
+  // ===== Tabela itens (colunas CERTAS dentro da borda) =====
   const tableY = budgetBarY + 28;
 
-  // Cabeçalho da tabela (cinza claro)
-  doc
-    .fillColor("#efefef")
-    .rect(x0, tableY, w0, 20)
-    .fill();
+  // colunas somando exatamente w0=515
+  const cols = {
+    n: 30,
+    desc: 245,
+    unit: 95,
+    qty: 70,
+    total: 75,
+  };
+
+  const xN = x0;
+  const xDesc = xN + cols.n;
+  const xUnit = xDesc + cols.desc;
+  const xQty = xUnit + cols.unit;
+  const xTotal = xQty + cols.qty;
+
+  // header cinza
+  doc.fillColor("#efefef").rect(x0, tableY, w0, 20).fill();
   doc.lineWidth(0.8).strokeColor("#d0d0d0").rect(x0, tableY, w0, 20).stroke();
 
   doc.fillColor("#111").font("Helvetica-Bold").fontSize(9);
-  doc.text("N°", x0 + 6, tableY + 6, { width: 24 });
-  doc.text("Descrição", x0 + 35, tableY + 6, { width: 250 });
-  doc.text("Valor unitário", x0 + 295, tableY + 6, { width: 90, align: "right" });
-  doc.text("Quantidade", x0 + 395, tableY + 6, { width: 70, align: "right" });
-  doc.text("Total do item", x0 + 470, tableY + 6, { width: 85, align: "right" });
+  doc.text("N°", xN + 6, tableY + 6, { width: cols.n - 8, align: "left" });
+  doc.text("Descrição", xDesc + 6, tableY + 6, { width: cols.desc - 12, align: "left" });
+  doc.text("Valor unitário", xUnit, tableY + 6, { width: cols.unit - 6, align: "right" });
+  doc.text("Quantidade", xQty, tableY + 6, { width: cols.qty - 6, align: "right" });
+  doc.text("Total do item", xTotal, tableY + 6, { width: cols.total - 6, align: "right" });
 
   let y = tableY + 26;
-  doc.font("Helvetica").fontSize(9).fillColor("#111");
 
   const rowH = 18;
-
-  // reserva espaço pro bloco “Observações + Valores”
   const reserveBottom = 170;
   const maxTableY = pageBottom - reserveBottom;
 
   const items = Array.isArray(budget.items) ? budget.items : [];
+
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-
-    // se estourar a área, quebra página (simples)
     if (y + rowH > maxTableY) break;
 
-    // linha
-    doc.lineWidth(0.5).strokeColor("#e1e1e1").moveTo(x0, y + 14).lineTo(x0 + w0, y + 14).stroke();
+    // linha separadora
+    doc
+      .lineWidth(0.5)
+      .strokeColor("#e1e1e1")
+      .moveTo(x0, y + 14)
+      .lineTo(x0 + w0, y + 14)
+      .stroke();
 
     const desc = it.description ? `${it.name} — ${it.description}` : it.name;
 
     doc.fillColor("#111").font("Helvetica").fontSize(9);
-    doc.text(String(i + 1), x0 + 6, y, { width: 24 });
-    doc.text(clipText(desc, 55), x0 + 35, y, { width: 250 });
-    doc.text(moneyBRL(it.unitPriceCents), x0 + 295, y, { width: 90, align: "right" });
-    doc.text(String(it.quantity || 1), x0 + 395, y, { width: 70, align: "right" });
-    doc.text(moneyBRL(it.totalCents), x0 + 470, y, { width: 85, align: "right" });
+    doc.text(String(i + 1), xN + 6, y, { width: cols.n - 8, align: "left" });
+    doc.text(clipText(desc, 60), xDesc + 6, y, { width: cols.desc - 12, align: "left" });
+    doc.text(moneyBRL(it.unitPriceCents), xUnit, y, { width: cols.unit - 6, align: "right" });
+    doc.text(String(it.quantity || 1), xQty, y, { width: cols.qty - 6, align: "right" });
+    doc.text(moneyBRL(it.totalCents), xTotal, y, { width: cols.total - 6, align: "right" });
 
     y += rowH;
   }
 
-  // ===== Observações + Valores (como seu modelo) =====
+  // ===== Observações + Valores =====
   const bottomY = Math.max(y + 12, maxTableY + 10);
 
   const obsW = 330;
@@ -329,7 +363,7 @@ async function budgetPdf(req, res) {
 
   const bottomH = pageBottom - bottomY - 18;
 
-  // OBSERVAÇÕES (caixa)
+  // Observações
   doc.lineWidth(0.9).strokeColor(BORDER).rect(obsX, bottomY, obsW, bottomH).stroke();
   doc.fillColor("#111").font("Helvetica-Bold").fontSize(10).text("Observações:", obsX + 8, bottomY + 8);
 
@@ -338,17 +372,14 @@ async function budgetPdf(req, res) {
   const baseTotal = Number(budget.subtotalCents || 0);
   const avistaTotal = Math.max(0, baseTotal - discountCents);
 
-  const discountPct =
-    baseTotal > 0 ? Math.round((discountCents / baseTotal) * 1000) / 10 : 0;
+  const discountPct = baseTotal > 0 ? Math.round((discountCents / baseTotal) * 1000) / 10 : 0;
 
   const autoObs = [
     notesUser ? notesUser : "—",
     "",
     "• Validade sugerida: 7 dias.",
     "• Valores sujeitos a reajuste após esse período.",
-    discountCents > 0
-      ? `• À vista com desconto de ${budget.discountType === "PERCENT" && budget.discountPercent ? `${budget.discountPercent}%` : `${discountPct}%`}.`
-      : "",
+    discountCents > 0 ? `• À vista com desconto de ${discountPct}%.` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -358,31 +389,23 @@ async function budgetPdf(req, res) {
     height: bottomH - 32,
   });
 
-  // VALORES (caixa + barra)
+  // Valores
   doc.lineWidth(0.9).strokeColor(BORDER).rect(valX, bottomY, valW, bottomH).stroke();
   drawBar(doc, valX, bottomY, valW, 18, "VALORES", ORANGE);
 
-  // padrão “em até 12x”
   const maxX = 12;
-  const per12 = Math.round(baseTotal / maxX);
+  const per12 = baseTotal > 0 ? Math.round(baseTotal / maxX) : 0;
 
   const lineY = bottomY + 28;
   doc.fillColor("#111").font("Helvetica").fontSize(9);
 
-  // 1) Valor em até 12x (total sem desconto à vista)
   doc.text("Valor em até 12x:", valX + 8, lineY, { width: valW - 16 });
   doc.font("Helvetica-Bold").text(moneyBRL(baseTotal), valX + 8, lineY, { width: valW - 16, align: "right" });
 
-  // 2) 12x
   doc.font("Helvetica").text("12x:", valX + 8, lineY + 16, { width: valW - 16 });
   doc.font("Helvetica-Bold").text(moneyBRL(per12), valX + 8, lineY + 16, { width: valW - 16, align: "right" });
 
-  // 3) À vista
-  const avistaLabel =
-    discountCents > 0
-      ? `À vista ${budget.discountType === "PERCENT" && budget.discountPercent ? `${budget.discountPercent}%` : `${discountPct}%`} Desc:`
-      : "À vista:";
-
+  const avistaLabel = discountCents > 0 ? `À vista ${discountPct}% Desc:` : "À vista:";
   doc.font("Helvetica").text(avistaLabel, valX + 8, lineY + 34, { width: valW - 16 });
   doc.font("Helvetica-Bold").text(moneyBRL(avistaTotal), valX + 8, lineY + 34, {
     width: valW - 16,
