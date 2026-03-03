@@ -452,6 +452,7 @@ async function deleteCost(req, res) {
 }
 
 // GET /api/costs/summary?month=YYYY-MM&workDays=22
+// GET /api/costs/summary?month=YYYY-MM&workDays=22
 async function costSummary(req, res) {
   const { salonId } = req.user;
 
@@ -477,7 +478,7 @@ async function costSummary(req, res) {
     select: { type: true, amountCents: true },
   });
 
- const fixedCents = costs
+  const fixedCents = costs
     .filter((c) => c.type === "FIXO")
     .reduce((a, c) => a + (c.amountCents || 0), 0);
 
@@ -487,15 +488,22 @@ async function costSummary(req, res) {
 
   const totalCents = fixedCents + variableCents;
 
-  // ✅ Mantém o dailyCents (total) por compatibilidade,
-  // mas expõe também o dailyFixedCents (FIXO / dias trabalhados)
+  // ⚠️ Mantém o antigo (compatibilidade)
   const dailyCents = Math.round(totalCents / workDays);
+
+  // ✅ NOVO: custo do dia APENAS FIXO (é o que o orçamento deve usar)
   const dailyFixedCents = Math.round(fixedCents / workDays);
 
   return res.json({
     month,
     workDays,
-    totals: { fixedCents, variableCents, totalCents, dailyCents, dailyFixedCents },
+    totals: {
+      fixedCents,
+      variableCents,
+      totalCents,
+      dailyCents,       // antigo
+      dailyFixedCents,  // ✅ novo
+    },
   });
 }
 

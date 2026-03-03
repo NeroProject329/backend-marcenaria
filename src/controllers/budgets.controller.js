@@ -1,11 +1,19 @@
 const { prisma } = require("../lib/prisma");
 
 // =====================
-// Helpers (iguais Orders)
+// Helpers
 // =====================
 function toInt(v, field) {
   const n = Number(v);
   if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    return { ok: false, message: `Campo inválido: ${field}` };
+  }
+  return { ok: true, value: n };
+}
+
+function toFloat(v, field) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) {
     return { ok: false, message: `Campo inválido: ${field}` };
   }
   return { ok: true, value: n };
@@ -36,12 +44,6 @@ function splitIntoInstallments(totalCents, count) {
   const arr = Array.from({ length: count }, () => base);
   arr[count - 1] = base + remainder;
   return arr;
-}
-
-function calcTotals(items, discountCents = 0) {
-  const subtotal = items.reduce((sum, it) => sum + it.totalCents, 0);
-  const total = Math.max(0, subtotal - (discountCents || 0));
-  return { subtotalCents: subtotal, totalCents: total };
 }
 
 const VALID_PAYMENT_MODE = new Set(["AVISTA", "PARCELADO"]);
@@ -78,6 +80,13 @@ function normalizeBudgetStatus(v) {
   if (!v) return undefined;
   const s = String(v).trim().toUpperCase();
   return VALID_BUDGET_STATUS.has(s) ? s : null;
+}
+
+function normalizeDiscountType(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  const t = String(v).trim().toUpperCase();
+  if (t === "VALOR" || t === "PERCENT") return t;
+  return null;
 }
 
 /**
@@ -124,6 +133,124 @@ function validateAndBuildBudgetInstallments({ installments, totalCents }) {
   }));
 
   return { ok: true, firstDueDate: installmentsData[0].dueDate, installmentsData };
+}
+
+// =====================
+// NOVO CÁLCULO (planilha)
+// materiais + (dias_fabricação * custo_do_dia) + taxa cartão (se parcelado) + custos adicionais + lucro%
+// desconto: apenas à vista
+// =====================
+function computeBudgetFromInputs({
+  itemsNorm,
+  deliveryDays,
+  dailyRateCents,
+  paymentMode,
+  paymentMethod,
+  installmentsCount,
+  cardFeePercentInput,
+  extras,
+  profitPercent,
+  discountType,
+  discountPercent,
+  discountCentsRaw,
+}) {
+  // 1) materiais (somatório de todos os materiais em todos os itens)
+  let materialsCents = 0;
+  for (const it of itemsNorm) {
+    const qtyItem = Number(it.quantity || 0);
+
+    const mats = Array.isArray(it.materials) ? it.materials : [];
+    const costPerUnit = mats.reduce((acc, m) => {
+      const q = Number(m.qty || 0);
+      const u = Number(m.unitCostCents || 0);
+      return acc + q * u;
+    }, 0);
+
+    const itemMatTotal = Math.round(qtyItem * costPerUnit);
+    materialsCents += Number.isFinite(itemMatTotal) ? itemMatTotal : 0;
+  }
+
+  // 2) custo do dia (dias_fabricação * custo_do_dia)
+  const days = Math.max(0, Number(deliveryDays || 0));
+  const daily = Math.max(0, Number(dailyRateCents || 0));
+  const laborCents = Math.round(days) * Math.round(daily);
+
+  // 3) custo do projeto (material + custo do dia total)
+  const projectCostCents = Math.max(0, materialsCents + laborCents);
+
+  // 4) taxa cartão (somente se PARCELADO + CARTAO)
+  let cardFeePercent = 0;
+  if (paymentMode === "PARCELADO" && paymentMethod === "CARTAO") {
+    const pct = Number(cardFeePercentInput);
+    cardFeePercent = Number.isFinite(pct) && pct >= 0 ? pct : 12.3;
+  }
+
+  const cardFeeCents =
+    cardFeePercent > 0 ? Math.round(projectCostCents * (cardFeePercent / 100)) : 0;
+
+  // 5) custos adicionais (lista)
+  const extrasNorm = Array.isArray(extras) ? extras : [];
+  const extrasCents = extrasNorm.reduce((acc, e) => acc + (Number(e.amountCents) || 0), 0);
+
+  // 6) base para lucro
+  const baseWithExtrasCents = Math.max(0, projectCostCents + cardFeeCents + extrasCents);
+
+  // 7) lucro %
+  const p = Number(profitPercent);
+  const profitPct = Number.isFinite(p) && p >= 0 ? p : 0;
+  const profitCents = profitPct > 0 ? Math.round(baseWithExtrasCents * (profitPct / 100)) : 0;
+
+  const totalBeforeDiscountCents = Math.max(0, baseWithExtrasCents + profitCents);
+
+  // 8) desconto (apenas à vista)
+  let effectiveDiscountCents = 0;
+  if (paymentMode === "AVISTA") {
+    if (discountType === "PERCENT") {
+      const dp = Number(discountPercent);
+      const pct = Number.isFinite(dp) && dp > 0 ? dp : 0;
+      effectiveDiscountCents = Math.round(totalBeforeDiscountCents * (pct / 100));
+    } else {
+      effectiveDiscountCents = Math.max(0, Number(discountCentsRaw) || 0);
+    }
+  }
+
+  if (effectiveDiscountCents > totalBeforeDiscountCents) {
+    effectiveDiscountCents = totalBeforeDiscountCents;
+  }
+
+  const totalCents = Math.max(0, totalBeforeDiscountCents - effectiveDiscountCents);
+
+  return {
+    materialsCents,
+    laborCents,
+    projectCostCents,
+    cardFeePercent,
+    cardFeeCents,
+    extrasCents,
+    profitPercent: profitPct,
+    profitCents,
+    totalBeforeDiscountCents,
+    discountCents: effectiveDiscountCents,
+    totalCents,
+  };
+}
+
+function normalizeExtras(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+
+  // aceita {name, amountCents} (já em centavos)
+  const out = [];
+  for (const e of list) {
+    const name = String(e?.name || "").trim();
+    if (!name) continue;
+
+    const amt = Number(e?.amountCents);
+    if (!Number.isFinite(amt) || !Number.isInteger(amt) || amt < 0) continue;
+
+    out.push({ name: name.slice(0, 60), amountCents: amt });
+  }
+
+  return out;
 }
 
 // =====================
@@ -198,7 +325,6 @@ async function getBudget(req, res) {
   return res.json({ budget });
 }
 
-
 // =====================
 // POST /api/budgets
 // =====================
@@ -206,22 +332,35 @@ async function createBudget(req, res) {
   const { salonId } = req.user;
 
   const {
-    deliveryDays,
-    dailyRateCents,
-    discountType,
-    discountPercent,
-    cardFeePercent,
     clientId,
     expectedDeliveryAt,
     notes,
-    discountCents,
-    items,
 
+    // produção
+    deliveryDays,
+    dailyRateCents,
+
+    // desconto à vista
+    discountType,
+    discountPercent,
+    discountCents,
+
+    // pagamento
     paymentMode,
     paymentMethod,
     installmentsCount,
     firstDueDate,
     installments, // custom
+
+    // taxa cartão
+    cardFeePercent,
+
+    // novos
+    extras, // [{name, amountCents}]
+    profitPercent,
+
+    // itens + materiais
+    items,
   } = req.body;
 
   if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
@@ -237,13 +376,65 @@ async function createBudget(req, res) {
     return res.status(400).json({ message: "expectedDeliveryAt inválido (use ISO date)." });
   }
 
-  const disc = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
-  if (!disc.ok) return res.status(400).json({ message: disc.message });
-  if (disc.value < 0) return res.status(400).json({ message: "discountCents inválido." });
-
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
   }
+
+  // produção
+  const dd =
+    deliveryDays !== undefined && deliveryDays !== null && deliveryDays !== ""
+      ? toInt(deliveryDays, "deliveryDays")
+      : { ok: true, value: null };
+  if (!dd.ok) return res.status(400).json({ message: dd.message });
+  if (dd.value !== null && dd.value < 0) return res.status(400).json({ message: "deliveryDays inválido." });
+
+  const dr =
+    dailyRateCents !== undefined && dailyRateCents !== null && dailyRateCents !== ""
+      ? toInt(dailyRateCents, "dailyRateCents")
+      : { ok: true, value: null };
+  if (!dr.ok) return res.status(400).json({ message: dr.message });
+  if (dr.value !== null && dr.value < 0) return res.status(400).json({ message: "dailyRateCents inválido." });
+
+  // desconto
+  const discTypeNorm = normalizeDiscountType(discountType) || "VALOR";
+  if (discountType !== undefined && discTypeNorm === null) {
+    return res.status(400).json({ message: "discountType inválido (VALOR ou PERCENT)." });
+  }
+
+  const discCentsRaw = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
+  if (!discCentsRaw.ok) return res.status(400).json({ message: discCentsRaw.message });
+  if (discCentsRaw.value < 0) return res.status(400).json({ message: "discountCents inválido." });
+
+  const discPctRaw = discountPercent !== undefined ? toFloat(discountPercent, "discountPercent") : { ok: true, value: 0 };
+  if (!discPctRaw.ok) return res.status(400).json({ message: discPctRaw.message });
+
+  // pagamento
+  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
+  if (paymentMode !== undefined && modeNorm === null) {
+    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
+  }
+
+  const methodNorm = normalizePaymentMethod(paymentMethod);
+  if (paymentMethod !== undefined && methodNorm === null) {
+    return res.status(400).json({ message: "paymentMethod inválido." });
+  }
+
+  let count = 1;
+  if (modeNorm === "PARCELADO") {
+    const c = toInt(installmentsCount, "installmentsCount");
+    if (!c.ok) return res.status(400).json({ message: c.message });
+    if (c.value < 2 || c.value > 24) {
+      return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
+    }
+    count = c.value;
+  }
+
+  const parsedFirst = toDateOrNull(firstDueDate);
+  if (firstDueDate && !parsedFirst) {
+    return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+  }
+
+  const baseDue = parsedFirst || exp || new Date();
 
   // normaliza itens + materiais
   const itemsNorm = [];
@@ -257,6 +448,7 @@ async function createBudget(req, res) {
       if (!q.ok) throw new Error(q.message);
       if (q.value <= 0) throw new Error(`Item ${i + 1}: quantity inválido.`);
 
+      // unitPriceCents agora é opcional (compatibilidade)
       const up = toInt(it.unitPriceCents ?? 0, `items[${i}].unitPriceCents`);
       if (!up.ok) throw new Error(up.message);
       if (up.value < 0) throw new Error(`Item ${i + 1}: unitPriceCents inválido.`);
@@ -278,11 +470,7 @@ async function createBudget(req, res) {
               throw new Error(`Item ${i + 1} material ${midx + 1}: unitCostCents inválido.`);
             }
 
-            return {
-              name: mName,
-              qty,
-              unitCostCents: Math.trunc(unitCostCents),
-            };
+            return { name: mName, qty, unitCostCents: Math.trunc(unitCostCents) };
           });
       }
 
@@ -299,43 +487,26 @@ async function createBudget(req, res) {
     return res.status(400).json({ message: e.message || "Itens/materiais inválidos." });
   }
 
-  const totals = calcTotals(
-    itemsNorm.map((x) => ({
-      name: x.name,
-      description: x.description,
-      quantity: x.quantity,
-      unitPriceCents: x.unitPriceCents,
-      totalCents: x.totalCents,
-    })),
-    disc.value
-  );
+  // extras
+  const extrasNorm = normalizeExtras(extras || req.body.additionalCosts || req.body.extraCosts);
 
-  // pagamento sugerido
-  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
-  if (paymentMode !== undefined && modeNorm === null) {
-    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
-  }
+  // calcula tudo no backend
+  const computed = computeBudgetFromInputs({
+    itemsNorm,
+    deliveryDays: dd.value ?? 0,
+    dailyRateCents: dr.value ?? 0,
+    paymentMode: modeNorm,
+    paymentMethod: methodNorm || null,
+    installmentsCount: count,
+    cardFeePercentInput: cardFeePercent,
+    extras: extrasNorm,
+    profitPercent,
+    discountType: discTypeNorm,
+    discountPercent: discPctRaw.value,
+    discountCentsRaw: discCentsRaw.value,
+  });
 
-  const methodNorm = normalizePaymentMethod(paymentMethod);
-  if (paymentMethod !== undefined && methodNorm === null) {
-    return res.status(400).json({ message: "paymentMethod inválido." });
-  }
-
-  let count = 1;
-  if (modeNorm === "PARCELADO") {
-    const c = toInt(installmentsCount, "installmentsCount");
-    if (!c.ok) return res.status(400).json({ message: c.message });
-    if (c.value < 2 || c.value > 24) return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
-    count = c.value;
-  }
-
-  const parsedFirst = toDateOrNull(firstDueDate);
-  if (firstDueDate && !parsedFirst) {
-    return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
-  }
-
-  const baseDue = parsedFirst || exp || new Date();
-
+  // parcelas do orçamento
   let finalFirstDueDate = baseDue;
   let budgetInstallmentsData = [];
 
@@ -348,7 +519,7 @@ async function createBudget(req, res) {
 
     const built = validateAndBuildBudgetInstallments({
       installments,
-      totalCents: totals.totalCents,
+      totalCents: computed.totalCents,
     });
 
     if (!built.ok) return res.status(400).json({ message: built.error });
@@ -356,15 +527,12 @@ async function createBudget(req, res) {
     finalFirstDueDate = built.firstDueDate;
     budgetInstallmentsData = built.installmentsData;
   } else if (modeNorm === "PARCELADO") {
-    const amounts = splitIntoInstallments(totals.totalCents, count);
+    const amounts = splitIntoInstallments(computed.totalCents, count);
     budgetInstallmentsData = amounts.map((amt, idx) => ({
       number: idx + 1,
       dueDate: addMonths(baseDue, idx),
       amountCents: amt,
     }));
-    finalFirstDueDate = baseDue;
-  } else {
-    budgetInstallmentsData = [];
     finalFirstDueDate = baseDue;
   }
 
@@ -375,23 +543,35 @@ async function createBudget(req, res) {
       status: "RASCUNHO",
       expectedDeliveryAt: exp,
       notes: notes ? String(notes).trim() : null,
-      discountCents: disc.value,
-      subtotalCents: totals.subtotalCents,
-      totalCents: totals.totalCents,
 
-      deliveryDays: deliveryDays ?? null,
-      dailyRateCents: dailyRateCents ?? null,
-      discountType: discountType ?? null,
-      discountPercent: discountPercent ?? null,
-      cardFeePercent: cardFeePercent ?? 12.3,
-
+      subtotalCents: computed.totalBeforeDiscountCents,
+      discountCents: computed.discountCents,
+      totalCents: computed.totalCents,
 
       paymentMode: modeNorm,
       paymentMethod: methodNorm || null,
       installmentsCount: count,
       firstDueDate: finalFirstDueDate,
 
-      // itens + materiais (nested)
+      deliveryDays: dd.value ?? null,
+      dailyRateCents: dr.value ?? null,
+
+      discountType: discTypeNorm,
+      discountPercent: discTypeNorm === "PERCENT" ? discPctRaw.value : null,
+
+      cardFeePercent: computed.cardFeePercent,
+
+      // breakdown
+      materialsCents: computed.materialsCents,
+      laborCents: computed.laborCents,
+      projectCostCents: computed.projectCostCents,
+      cardFeeCents: computed.cardFeeCents,
+      extrasCents: computed.extrasCents,
+      extrasJson: extrasNorm.length ? JSON.stringify(extrasNorm) : null,
+      profitPercent: computed.profitPercent,
+      profitCents: computed.profitCents,
+      totalBeforeDiscountCents: computed.totalBeforeDiscountCents,
+
       items: {
         create: itemsNorm.map((it) => ({
           name: it.name,
@@ -415,9 +595,8 @@ async function createBudget(req, res) {
   return res.status(201).json({ budget: created });
 }
 
-
 // =====================
-// PATCH /api/budgets/:id  (simples)
+// PATCH /api/budgets/:id/full
 // =====================
 async function updateBudgetFull(req, res) {
   const { salonId } = req.user;
@@ -438,19 +617,26 @@ async function updateBudgetFull(req, res) {
     status,
     expectedDeliveryAt,
     notes,
+
+    deliveryDays,
+    dailyRateCents,
+
+    discountType,
+    discountPercent,
     discountCents,
-    items,
+
     paymentMode,
     paymentMethod,
     installmentsCount,
     firstDueDate,
     installments, // custom
-    deliveryDays,
-    dailyRateCents,
-    discountType,
-    discountPercent,
+
     cardFeePercent,
 
+    extras,
+    profitPercent,
+
+    items,
   } = req.body;
 
   if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
@@ -467,15 +653,59 @@ async function updateBudgetFull(req, res) {
   const exp = toDateOrNull(expectedDeliveryAt);
   if (expectedDeliveryAt && !exp) return res.status(400).json({ message: "expectedDeliveryAt inválido (use ISO date)." });
 
-  const disc = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
-  if (!disc.ok) return res.status(400).json({ message: disc.message });
-  if (disc.value < 0) return res.status(400).json({ message: "discountCents inválido." });
+  const dd =
+    deliveryDays !== undefined && deliveryDays !== null && deliveryDays !== ""
+      ? toInt(deliveryDays, "deliveryDays")
+      : { ok: true, value: null };
+  if (!dd.ok) return res.status(400).json({ message: dd.message });
+  if (dd.value !== null && dd.value < 0) return res.status(400).json({ message: "deliveryDays inválido." });
+
+  const dr =
+    dailyRateCents !== undefined && dailyRateCents !== null && dailyRateCents !== ""
+      ? toInt(dailyRateCents, "dailyRateCents")
+      : { ok: true, value: null };
+  if (!dr.ok) return res.status(400).json({ message: dr.message });
+  if (dr.value !== null && dr.value < 0) return res.status(400).json({ message: "dailyRateCents inválido." });
+
+  const discTypeNorm = normalizeDiscountType(discountType) || "VALOR";
+  if (discountType !== undefined && discTypeNorm === null) {
+    return res.status(400).json({ message: "discountType inválido (VALOR ou PERCENT)." });
+  }
+
+  const discCentsRaw = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
+  if (!discCentsRaw.ok) return res.status(400).json({ message: discCentsRaw.message });
+  if (discCentsRaw.value < 0) return res.status(400).json({ message: "discountCents inválido." });
+
+  const discPctRaw = discountPercent !== undefined ? toFloat(discountPercent, "discountPercent") : { ok: true, value: 0 };
+  if (!discPctRaw.ok) return res.status(400).json({ message: discPctRaw.message });
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
   }
 
-  // normaliza itens + materiais
+  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
+  if (paymentMode !== undefined && modeNorm === null) {
+    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
+  }
+
+  const methodNorm = normalizePaymentMethod(paymentMethod);
+  if (paymentMethod !== undefined && methodNorm === null) {
+    return res.status(400).json({ message: "paymentMethod inválido." });
+  }
+
+  let count = 1;
+  if (modeNorm === "PARCELADO") {
+    const c = toInt(installmentsCount, "installmentsCount");
+    if (!c.ok) return res.status(400).json({ message: c.message });
+    if (c.value < 2 || c.value > 24) return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
+    count = c.value;
+  }
+
+  const parsedFirst = toDateOrNull(firstDueDate);
+  if (firstDueDate && !parsedFirst) return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
+
+  const baseDue = parsedFirst || exp || new Date();
+
   const itemsNorm = [];
   try {
     for (let i = 0; i < items.length; i++) {
@@ -524,39 +754,22 @@ async function updateBudgetFull(req, res) {
     return res.status(400).json({ message: e.message || "Itens/materiais inválidos." });
   }
 
-  const totals = calcTotals(
-    itemsNorm.map((x) => ({
-      name: x.name,
-      description: x.description,
-      quantity: x.quantity,
-      unitPriceCents: x.unitPriceCents,
-      totalCents: x.totalCents,
-    })),
-    disc.value
-  );
+  const extrasNorm = normalizeExtras(extras || req.body.additionalCosts || req.body.extraCosts);
 
-  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
-  if (paymentMode !== undefined && modeNorm === null) {
-    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
-  }
-
-  const methodNorm = normalizePaymentMethod(paymentMethod);
-  if (paymentMethod !== undefined && methodNorm === null) {
-    return res.status(400).json({ message: "paymentMethod inválido." });
-  }
-
-  let count = 1;
-  if (modeNorm === "PARCELADO") {
-    const c = toInt(installmentsCount, "installmentsCount");
-    if (!c.ok) return res.status(400).json({ message: c.message });
-    if (c.value < 2 || c.value > 24) return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
-    count = c.value;
-  }
-
-  const parsedFirst = toDateOrNull(firstDueDate);
-  if (firstDueDate && !parsedFirst) return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
-
-  const baseDue = parsedFirst || exp || new Date();
+  const computed = computeBudgetFromInputs({
+    itemsNorm,
+    deliveryDays: dd.value ?? 0,
+    dailyRateCents: dr.value ?? 0,
+    paymentMode: modeNorm,
+    paymentMethod: methodNorm || null,
+    installmentsCount: count,
+    cardFeePercentInput: cardFeePercent,
+    extras: extrasNorm,
+    profitPercent,
+    discountType: discTypeNorm,
+    discountPercent: discPctRaw.value,
+    discountCentsRaw: discCentsRaw.value,
+  });
 
   let finalFirstDueDate = baseDue;
   let budgetInstallmentsData = [];
@@ -570,7 +783,7 @@ async function updateBudgetFull(req, res) {
 
     const built = validateAndBuildBudgetInstallments({
       installments,
-      totalCents: totals.totalCents,
+      totalCents: computed.totalCents,
     });
 
     if (!built.ok) return res.status(400).json({ message: built.error });
@@ -578,20 +791,16 @@ async function updateBudgetFull(req, res) {
     finalFirstDueDate = built.firstDueDate;
     budgetInstallmentsData = built.installmentsData;
   } else if (modeNorm === "PARCELADO") {
-    const amounts = splitIntoInstallments(totals.totalCents, count);
+    const amounts = splitIntoInstallments(computed.totalCents, count);
     budgetInstallmentsData = amounts.map((amt, idx) => ({
       number: idx + 1,
       dueDate: addMonths(baseDue, idx),
       amountCents: amt,
     }));
     finalFirstDueDate = baseDue;
-  } else {
-    budgetInstallmentsData = [];
-    finalFirstDueDate = baseDue;
   }
 
   await prisma.$transaction(async (tx) => {
-    // update budget base
     await tx.budget.update({
       where: { id },
       data: {
@@ -599,26 +808,38 @@ async function updateBudgetFull(req, res) {
         ...(statusNorm ? { status: statusNorm } : {}),
         expectedDeliveryAt: exp,
         notes: notes ? String(notes).trim() : null,
-        discountCents: disc.value,
-        subtotalCents: totals.subtotalCents,
-        totalCents: totals.totalCents,
+
+        subtotalCents: computed.totalBeforeDiscountCents,
+        discountCents: computed.discountCents,
+        totalCents: computed.totalCents,
 
         paymentMode: modeNorm,
         paymentMethod: methodNorm || null,
         installmentsCount: count,
         firstDueDate: finalFirstDueDate,
-        
-        deliveryDays: deliveryDays ?? null,
-        dailyRateCents: dailyRateCents ?? null,
-        discountType: discountType ?? null,
-        discountPercent: discountPercent ?? null,
-        cardFeePercent: cardFeePercent ?? 12.3,
 
+        deliveryDays: dd.value ?? null,
+        dailyRateCents: dr.value ?? null,
+
+        discountType: discTypeNorm,
+        discountPercent: discTypeNorm === "PERCENT" ? discPctRaw.value : null,
+
+        cardFeePercent: computed.cardFeePercent,
+
+        // breakdown
+        materialsCents: computed.materialsCents,
+        laborCents: computed.laborCents,
+        projectCostCents: computed.projectCostCents,
+        cardFeeCents: computed.cardFeeCents,
+        extrasCents: computed.extrasCents,
+        extrasJson: extrasNorm.length ? JSON.stringify(extrasNorm) : null,
+        profitPercent: computed.profitPercent,
+        profitCents: computed.profitCents,
+        totalBeforeDiscountCents: computed.totalBeforeDiscountCents,
       },
       select: { id: true },
     });
 
-    // installments do orçamento (mantém sua lógica atual)
     await tx.budgetInstallment.deleteMany({ where: { budgetId: id } });
     if (budgetInstallmentsData.length) {
       await tx.budgetInstallment.createMany({
@@ -626,16 +847,11 @@ async function updateBudgetFull(req, res) {
       });
     }
 
-    // ===== itens + materiais =====
-    // apaga materiais dos itens desse budget
     await tx.budgetItemMaterial.deleteMany({
       where: { budgetItem: { budgetId: id } },
     });
-
-    // apaga itens
     await tx.budgetItem.deleteMany({ where: { budgetId: id } });
 
-    // recria itens + materiais (create com nested)
     for (const it of itemsNorm) {
       await tx.budgetItem.create({
         data: {
@@ -647,177 +863,6 @@ async function updateBudgetFull(req, res) {
           totalCents: it.totalCents,
           ...(it.materials?.length ? { materials: { create: it.materials } } : {}),
         },
-      });
-    }
-  });
-
-  return res.json({ ok: true, budgetId: id });
-}
-
-
-// =====================
-// PATCH /api/budgets/:id/full
-// =====================
-async function updateBudgetFull(req, res) {
-  const { salonId } = req.user;
-  const { id } = req.params;
-
-  const exists = await prisma.budget.findFirst({
-    where: { id, salonId },
-    select: { id: true, status: true },
-  });
-  if (!exists) return res.status(404).json({ message: "Orçamento não encontrado." });
-
-  if (exists.status === "APROVADO") {
-    return res.status(409).json({ message: "Orçamento já aprovado. Não é possível editar." });
-  }
-
-  const {
-    clientId,
-    status,
-    expectedDeliveryAt,
-    notes,
-    discountCents,
-    items,
-    paymentMode,
-    paymentMethod,
-    installmentsCount,
-    firstDueDate,
-    installments, // custom
-  } = req.body;
-
-  if (!clientId) return res.status(400).json({ message: "clientId é obrigatório." });
-
-  const client = await prisma.client.findFirst({
-    where: { id: clientId, salonId },
-    select: { id: true },
-  });
-  if (!client) return res.status(404).json({ message: "Cliente não encontrado." });
-
-  const statusNorm = status ? normalizeBudgetStatus(status) : undefined;
-  if (status && statusNorm === null) return res.status(400).json({ message: "status inválido." });
-
-  const exp = toDateOrNull(expectedDeliveryAt);
-  if (expectedDeliveryAt && !exp) return res.status(400).json({ message: "expectedDeliveryAt inválido (use ISO date)." });
-
-  const disc = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
-  if (!disc.ok) return res.status(400).json({ message: disc.message });
-  if (disc.value < 0) return res.status(400).json({ message: "discountCents inválido." });
-
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
-  }
-
-  // normaliza itens
-  const itemsNorm = [];
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i] || {};
-    const name = String(it.name || "").trim();
-    if (name.length < 2) return res.status(400).json({ message: `Item ${i + 1}: nome inválido.` });
-
-    const q = toInt(it.quantity ?? 1, `items[${i}].quantity`);
-    if (!q.ok) return res.status(400).json({ message: q.message });
-    if (q.value <= 0) return res.status(400).json({ message: `Item ${i + 1}: quantity inválido.` });
-
-    const up = toInt(it.unitPriceCents ?? 0, `items[${i}].unitPriceCents`);
-    if (!up.ok) return res.status(400).json({ message: up.message });
-    if (up.value < 0) return res.status(400).json({ message: `Item ${i + 1}: unitPriceCents inválido.` });
-
-    itemsNorm.push({
-      name,
-      description: it.description ? String(it.description).trim() : null,
-      quantity: q.value,
-      unitPriceCents: up.value,
-      totalCents: q.value * up.value,
-    });
-  }
-
-  const totals = calcTotals(itemsNorm, disc.value);
-
-  // pagamento
-  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
-  if (paymentMode !== undefined && modeNorm === null) {
-    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
-  }
-
-  const methodNorm = normalizePaymentMethod(paymentMethod);
-  if (paymentMethod !== undefined && methodNorm === null) {
-    return res.status(400).json({ message: "paymentMethod inválido." });
-  }
-
-  let count = 1;
-  if (modeNorm === "PARCELADO") {
-    const c = toInt(installmentsCount, "installmentsCount");
-    if (!c.ok) return res.status(400).json({ message: c.message });
-    if (c.value < 2 || c.value > 24) return res.status(400).json({ message: "installmentsCount deve ser entre 2 e 24." });
-    count = c.value;
-  }
-
-  const parsedFirst = toDateOrNull(firstDueDate);
-  if (firstDueDate && !parsedFirst) return res.status(400).json({ message: "firstDueDate inválido (use ISO date)." });
-
-  const baseDue = parsedFirst || exp || new Date();
-
-  let finalFirstDueDate = baseDue;
-  let budgetInstallmentsData = [];
-
-  if (modeNorm === "PARCELADO" && Array.isArray(installments) && installments.length) {
-    if (installments.length !== count) {
-      return res.status(400).json({
-        message: `installments tem ${installments.length} parcelas, mas installmentsCount é ${count}.`,
-      });
-    }
-
-    const built = validateAndBuildBudgetInstallments({
-      installments,
-      totalCents: totals.totalCents,
-    });
-
-    if (!built.ok) return res.status(400).json({ message: built.error });
-
-    finalFirstDueDate = built.firstDueDate;
-    budgetInstallmentsData = built.installmentsData;
-  } else if (modeNorm === "PARCELADO") {
-    const amounts = splitIntoInstallments(totals.totalCents, count);
-    budgetInstallmentsData = amounts.map((amt, idx) => ({
-      number: idx + 1,
-      dueDate: addMonths(baseDue, idx),
-      amountCents: amt,
-    }));
-    finalFirstDueDate = baseDue;
-  }
-
-  await prisma.$transaction(async (tx) => {
-    await tx.budget.update({
-      where: { id },
-      data: {
-        clientId,
-        ...(statusNorm ? { status: statusNorm } : {}),
-        expectedDeliveryAt: exp,
-        notes: notes ? String(notes).trim() : null,
-        discountCents: disc.value,
-        subtotalCents: totals.subtotalCents,
-        totalCents: totals.totalCents,
-
-        paymentMode: modeNorm,
-        paymentMethod: methodNorm || null,
-        installmentsCount: count,
-        firstDueDate: finalFirstDueDate,
-      },
-      select: { id: true },
-    });
-
-    // troca itens
-    await tx.budgetItem.deleteMany({ where: { budgetId: id } });
-    await tx.budgetItem.createMany({
-      data: itemsNorm.map((it) => ({ ...it, budgetId: id })),
-    });
-
-    // troca parcelas do orçamento (se tiver model)
-    await tx.budgetInstallment.deleteMany({ where: { budgetId: id } });
-    if (budgetInstallmentsData.length) {
-      await tx.budgetInstallment.createMany({
-        data: budgetInstallmentsData.map((p) => ({ ...p, budgetId: id })),
       });
     }
   });
@@ -879,8 +924,6 @@ async function cancelBudget(req, res) {
 
 // =====================
 // POST /api/budgets/:id/approve
-// - Cria Order + Receivable (igual orders.controller)
-// - Marca Budget como APROVADO e linka approvedOrderId
 // =====================
 async function approveBudget(req, res) {
   const { salonId } = req.user;
@@ -903,9 +946,6 @@ async function approveBudget(req, res) {
     return res.status(409).json({ message: "Orçamento cancelado. Não é possível aprovar." });
   }
 
-  // cria installments para RECEIVABLE:
-  // - se orçamento PARCELADO e tiver installments custom -> usa essas datas/valores
-  // - senão gera mensal automático
   const now = new Date();
 
   let installmentsData = [];
@@ -935,7 +975,6 @@ async function approveBudget(req, res) {
       }));
     }
   } else {
-    // AVISTA -> 1 parcela (pendente)
     installmentsData = [
       {
         number: 1,
@@ -949,12 +988,11 @@ async function approveBudget(req, res) {
   }
 
   const created = await prisma.$transaction(async (tx) => {
-    // 1) cria Order com itens do Budget
     const order = await tx.order.create({
       data: {
         salonId,
         clientId: budget.clientId,
-        status: "PEDIDO", // quando aprovar, vira pedido
+        status: "PEDIDO",
         expectedDeliveryAt: budget.expectedDeliveryAt,
         notes: budget.notes,
 
@@ -980,7 +1018,6 @@ async function approveBudget(req, res) {
       select: { id: true, status: true, createdAt: true },
     });
 
-    // 2) cria receivable + installments (financeiro)
     const receivable = await tx.receivable.create({
       data: {
         salonId,
@@ -1008,7 +1045,6 @@ async function approveBudget(req, res) {
       },
     });
 
-    // 3) marca orçamento como aprovado e linka pedido
     const updatedBudget = await tx.budget.update({
       where: { id: budget.id },
       data: {
@@ -1038,13 +1074,13 @@ async function deleteBudget(req, res) {
   });
   if (!exists) return res.status(404).json({ message: "Orçamento não encontrado." });
 
-  // se já aprovou, não deixa deletar (porque já virou pedido)
   if (exists.status === "APROVADO") {
-    return res.status(409).json({ message: "Orçamento já aprovado. Não é possível excluir." });
+    return res.status(409).json({ message: "Orçamento aprovado não pode ser removido." });
   }
 
   await prisma.$transaction(async (tx) => {
     await tx.budgetInstallment.deleteMany({ where: { budgetId: id } });
+    await tx.budgetItemMaterial.deleteMany({ where: { budgetItem: { budgetId: id } } });
     await tx.budgetItem.deleteMany({ where: { budgetId: id } });
     await tx.budget.delete({ where: { id } });
   });
