@@ -52,16 +52,19 @@ function buildClientAddress(c) {
     .join(", ");
 
   const cityUF = [c?.cidade, c?.estado].filter(Boolean).join(" - ");
+
   const line2 = [
     c?.bairro ? String(c.bairro).trim() : "",
     cityUF ? cityUF : "",
     c?.cep ? `CEP ${onlyDigits(c.cep)}` : "",
   ]
     .filter(Boolean)
-    .join(" • ");
+    .join(" - ");
 
-  const out = [line1, line2].filter(Boolean).join("\n");
-  return out || "-";
+  // ✅ tudo em UMA linha
+  const oneLine = [line1, line2].filter(Boolean).join(" - ");
+
+  return oneLine || "-";
 }
 
 function fetchBuffer(url) {
@@ -259,7 +262,15 @@ async function budgetPdf(req, res) {
   );
 
   // ✅ ENDEREÇO DO TOPO CENTRALIZADO (era left)
-  drawField(doc, rowX, hfY1 + 30, rowW, "Endereço", salon.address || "-", { align: "center", valueFontSize: 8 });
+  drawField(
+  doc,
+  x0,
+  cY2,
+  wAddr,
+  "Endereço",
+  clipText(buildClientAddress(client), 72),
+  { align: "left", valueFontSize: 8 }
+);
 
   // ===== CLIENTE =====
   const clientBarY = headerY + headerH + 12;

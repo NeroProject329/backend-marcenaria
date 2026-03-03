@@ -1,20 +1,25 @@
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth.middleware");
+const { checkLimit } = require("../middlewares/plan.middleware");
+
 const {
   listClients,
   createClient,
   updateClient,
   deleteClient,
   listClientsWithMetrics,
-  listClientOrders, // ✅ NOVO
+  listClientOrders,
+  getClientHistory, // ✅ NOVO
 } = require("../controllers/clients.controller");
-const { checkLimit } = require("../middlewares/plan.middleware"); 
 
 router.use(requireAuth);
 
 router.get("/metrics", listClientsWithMetrics);
 
-// ✅ NOVO: histórico de pedidos do cliente
+// ✅ NOVO: histórico completo do cliente (pedidos + orçamentos + timeline)
+router.get("/:id/history", getClientHistory);
+
+// Mantido: histórico só de pedidos (não quebra nada existente)
 router.get("/:id/orders", listClientOrders);
 
 router.get("/", listClients);
