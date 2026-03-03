@@ -26,7 +26,6 @@ function clipText(s, max = 140) {
   return t.length > max ? t.slice(0, max - 1).trim() + "…" : t;
 }
 
-// corta “resumo interno” se existir no notes
 function clientNotes(raw) {
   if (!raw) return "";
   let s = String(raw);
@@ -94,7 +93,6 @@ function drawBar(doc, x, y, w, h, text, color) {
   doc.restore();
 }
 
-// ✅ agora dá pra escolher alinhamento e fonte do valor
 function drawField(doc, x, y, w, label, value, opts = {}) {
   const { align = "left", valueFontSize = 9 } = opts;
 
@@ -153,6 +151,8 @@ async function budgetPdf(req, res) {
         },
       },
       items: { orderBy: { createdAt: "asc" } },
+      // ✅ incluir parcelas pra mostrar o valor correto da parcela no PDF
+      installments: { orderBy: { number: "asc" } },
     },
   });
 
@@ -179,10 +179,8 @@ async function budgetPdf(req, res) {
   const h0 = 780;
   const pageBottom = y0 + h0;
 
-  // borda externa
   doc.lineWidth(1).strokeColor(BORDER).rect(x0, y0, w0, h0).stroke();
 
-  // ===== Cabeçalho =====
   const salon = budget.salon || {};
   const client = budget.client || {};
 
@@ -222,7 +220,7 @@ async function budgetPdf(req, res) {
     .fontSize(14)
     .text(ref, boxX, boxY + 16, { width: boxW, align: "center" });
 
-  // ✅ título centralizado exatamente ENTRE logo e box
+  // título centralizado entre logo e box
   const titleLeft = x0 + 80;
   const titleRight = boxX - 10;
   const titleW = Math.max(200, titleRight - titleLeft);
@@ -240,20 +238,28 @@ async function budgetPdf(req, res) {
   const hfY1 = headerY + 50;
   const gap = 10;
 
-  const rowX = titleLeft;              // alinha com título
-  const rowRight = x0 + w0 - 10;       // deixa “respiro” na borda
+  const rowX = titleLeft;
+  const rowRight = x0 + w0 - 10;
   const rowW = rowRight - rowX;
 
-  // distribuição bonitinha
   const wTel = 200;
   const wData = 140;
   const wPrev = rowW - wTel - wData - gap * 2;
 
   drawField(doc, rowX, hfY1, wTel, "Telefone", salon.phone || "-", { align: "center" });
   drawField(doc, rowX + wTel + gap, hfY1, wData, "Data orçamento", fmtDate(budget.createdAt), { align: "center" });
-  drawField(doc, rowX + wTel + gap + wData + gap, hfY1, wPrev, "Previsão entrega", fmtDate(budget.expectedDeliveryAt), { align: "center" });
+  drawField(
+    doc,
+    rowX + wTel + gap + wData + gap,
+    hfY1,
+    wPrev,
+    "Previsão entrega",
+    fmtDate(budget.expectedDeliveryAt),
+    { align: "center" }
+  );
 
-  drawField(doc, rowX, hfY1 + 30, rowW, "Endereço", salon.address || "-", { align: "left" });
+  // ✅ ENDEREÇO DO TOPO CENTRALIZADO (era left)
+  drawField(doc, rowX, hfY1 + 30, rowW, "Endereço", salon.address || "-", { align: "center", valueFontSize: 8 });
 
   // ===== CLIENTE =====
   const clientBarY = headerY + headerH + 12;
@@ -274,8 +280,6 @@ async function budgetPdf(req, res) {
   const wEmail = w0 - wAddr - gap;
 
   drawField(doc, x0, cY2, wAddr, "Endereço", buildClientAddress(client), { align: "left" });
-
-  // ✅ e-mail: fonte menor + corta pra não quebrar feio
   drawField(
     doc,
     x0 + wAddr + gap,
@@ -290,17 +294,10 @@ async function budgetPdf(req, res) {
   const budgetBarY = cY2 + 52;
   drawBar(doc, x0, budgetBarY, w0, 18, "ORÇAMENTO", ORANGE);
 
-  // ===== Tabela itens (colunas CERTAS dentro da borda) =====
+  // ===== Tabela itens =====
   const tableY = budgetBarY + 28;
 
-  // colunas somando exatamente w0=515
-  const cols = {
-    n: 30,
-    desc: 245,
-    unit: 95,
-    qty: 70,
-    total: 75,
-  };
+  const cols = { n: 30, desc: 245, unit: 95, qty: 70, total: 75 };
 
   const xN = x0;
   const xDesc = xN + cols.n;
@@ -308,7 +305,6 @@ async function budgetPdf(req, res) {
   const xQty = xUnit + cols.unit;
   const xTotal = xQty + cols.qty;
 
-  // header cinza
   doc.fillColor("#efefef").rect(x0, tableY, w0, 20).fill();
   doc.lineWidth(0.8).strokeColor("#d0d0d0").rect(x0, tableY, w0, 20).stroke();
 
@@ -320,8 +316,8 @@ async function budgetPdf(req, res) {
   doc.text("Total do item", xTotal, tableY + 6, { width: cols.total - 6, align: "right" });
 
   let y = tableY + 26;
-
   const rowH = 18;
+
   const reserveBottom = 170;
   const maxTableY = pageBottom - reserveBottom;
 
@@ -331,7 +327,6 @@ async function budgetPdf(req, res) {
     const it = items[i];
     if (y + rowH > maxTableY) break;
 
-    // linha separadora
     doc
       .lineWidth(0.5)
       .strokeColor("#e1e1e1")
@@ -368,18 +363,16 @@ async function budgetPdf(req, res) {
   doc.fillColor("#111").font("Helvetica-Bold").fontSize(10).text("Observações:", obsX + 8, bottomY + 8);
 
   const notesUser = clientNotes(budget.notes);
+
   const discountCents = Number(budget.discountCents || 0);
   const baseTotal = Number(budget.subtotalCents || 0);
-  const avistaTotal = Math.max(0, baseTotal - discountCents);
-
-  const discountPct = baseTotal > 0 ? Math.round((discountCents / baseTotal) * 1000) / 10 : 0;
+  const totalCents = Number(budget.totalCents || 0);
 
   const autoObs = [
     notesUser ? notesUser : "—",
     "",
     "• Validade sugerida: 7 dias.",
     "• Valores sujeitos a reajuste após esse período.",
-    discountCents > 0 ? `• À vista com desconto de ${discountPct}%.` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -389,28 +382,47 @@ async function budgetPdf(req, res) {
     height: bottomH - 32,
   });
 
-  // Valores
+  // ===== VALORES (NOVO COMPORTAMENTO) =====
   doc.lineWidth(0.9).strokeColor(BORDER).rect(valX, bottomY, valW, bottomH).stroke();
   drawBar(doc, valX, bottomY, valW, 18, "VALORES", ORANGE);
 
-  const maxX = 12;
-  const per12 = baseTotal > 0 ? Math.round(baseTotal / maxX) : 0;
+  const mode = String(budget.paymentMode || "AVISTA").toUpperCase();
+  const installmentsCount = Number(budget.installmentsCount || 1);
 
-  const lineY = bottomY + 28;
+  // valor final que o cliente paga
+  const avistaTotal = Math.max(0, baseTotal - discountCents);
+
+  // parcela (usa a 1ª do budget.installments se existir, senão divide)
+  let perInstallmentCents = 0;
+  if (mode === "PARCELADO" && installmentsCount > 1) {
+    if (Array.isArray(budget.installments) && budget.installments.length) {
+      perInstallmentCents = Number(budget.installments[0].amountCents || 0);
+    } else {
+      perInstallmentCents = Math.round(totalCents / installmentsCount);
+    }
+  }
+
+  const lineY = bottomY + 30;
   doc.fillColor("#111").font("Helvetica").fontSize(9);
 
-  doc.text("Valor em até 12x:", valX + 8, lineY, { width: valW - 16 });
-  doc.font("Helvetica-Bold").text(moneyBRL(baseTotal), valX + 8, lineY, { width: valW - 16, align: "right" });
+  if (mode === "PARCELADO" && installmentsCount > 1) {
+    // ✅ Parcelado: Valor total + “Nx de R$”
+    doc.text("Valor total:", valX + 8, lineY, { width: valW - 16 });
+    doc.font("Helvetica-Bold").text(moneyBRL(totalCents), valX + 8, lineY, { width: valW - 16, align: "right" });
 
-  doc.font("Helvetica").text("12x:", valX + 8, lineY + 16, { width: valW - 16 });
-  doc.font("Helvetica-Bold").text(moneyBRL(per12), valX + 8, lineY + 16, { width: valW - 16, align: "right" });
-
-  const avistaLabel = discountCents > 0 ? `À vista ${discountPct}% Desc:` : "À vista:";
-  doc.font("Helvetica").text(avistaLabel, valX + 8, lineY + 34, { width: valW - 16 });
-  doc.font("Helvetica-Bold").text(moneyBRL(avistaTotal), valX + 8, lineY + 34, {
-    width: valW - 16,
-    align: "right",
-  });
+    doc.font("Helvetica").text(`${installmentsCount}x de:`, valX + 8, lineY + 18, { width: valW - 16 });
+    doc.font("Helvetica-Bold").text(moneyBRL(perInstallmentCents), valX + 8, lineY + 18, {
+      width: valW - 16,
+      align: "right",
+    });
+  } else {
+    // ✅ À vista: “À vista:” + valor final (com desconto se houver)
+    doc.text("À vista:", valX + 8, lineY, { width: valW - 16 });
+    doc.font("Helvetica-Bold").text(moneyBRL(avistaTotal || totalCents), valX + 8, lineY, {
+      width: valW - 16,
+      align: "right",
+    });
+  }
 
   doc.end();
 }
