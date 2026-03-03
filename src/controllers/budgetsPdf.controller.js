@@ -262,15 +262,7 @@ async function budgetPdf(req, res) {
   );
 
   // ✅ ENDEREÇO DO TOPO CENTRALIZADO (era left)
-  drawField(
-  doc,
-  x0,
-  cY2,
-  wAddr,
-  "Endereço",
-  clipText(buildClientAddress(client), 72),
-  { align: "left", valueFontSize: 8 }
-);
+  drawField(doc, rowX, hfY1 + 30, rowW, "Endereço", salon.address || "-", { align: "center", valueFontSize: 8 });
 
   // ===== CLIENTE =====
   const clientBarY = headerY + headerH + 12;
@@ -290,7 +282,16 @@ async function budgetPdf(req, res) {
   const wAddr = 360;
   const wEmail = w0 - wAddr - gap;
 
-  drawField(doc, x0, cY2, wAddr, "Endereço", buildClientAddress(client), { align: "left" });
+  drawField(
+  doc,
+  x0,
+  cY2,
+  wAddr,
+  "Endereço",
+  clipText(buildClientAddress(client), 72),
+  { align: "left", valueFontSize: 8 }
+);
+
   drawField(
     doc,
     x0 + wAddr + gap,
