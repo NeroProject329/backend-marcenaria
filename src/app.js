@@ -26,6 +26,9 @@ const reportsRoutes = require("./routes/reports.routes");
 
 const reportsExtraRoutes = require("./routes/reportsExtra.routes");
 
+// ✅ SAAS-P2: Billing (checkout AbacatePay)
+const billingRoutes = require("./routes/billing.routes");
+
 
 const app = express();
 app.use(cors());
@@ -53,9 +56,15 @@ app.use("/api/materials", materialsRoutes);
 app.use("/api/employees", employeesRoutes);
 
 
+
+
+
 // ✅ NOVO
 app.use("/api/reports", reportsRoutes);
 
 app.use("/api/reports", reportsExtraRoutes);
+
+// ✅ SAAS-P2
+app.use("/api/billing", billingRoutes);
 
 module.exports = { app };
