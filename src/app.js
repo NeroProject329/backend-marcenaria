@@ -18,6 +18,8 @@ const costsRoutes = require("./routes/costs.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
 const budgetsRoutes = require("./routes/budgets.routes");
 const materialsRoutes = require("./routes/materials.routes");
+const { prisma } = require("./lib/prisma");
+const jwt = require("jsonwebtoken");
 
 // ✅ NOVO: Funcionários
 const employeesRoutes = require("./routes/employees.routes");
