@@ -485,10 +485,135 @@ async function reportPack(req, res) {
   }
 }
 
-function drawRow(doc, label, value, xL, xR, y, options = {}) {
-  const { bold = false } = options;
-  doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(11).fillColor("#0f172a").text(label, xL, y, { width: 280 });
-  doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(11).fillColor("#0f172a").text(value, xR - 180, y, { width: 180, align: "right" });
+function drawMiniHeader(doc, ctx) {
+  const pageW = doc.page.width;
+  const margin = doc.page.margins.left;
+
+  doc.rect(0, 0, pageW, 46).fill("#0b1220");
+  doc
+    .fillColor("#ffffff")
+    .font("Helvetica-Bold")
+    .fontSize(12)
+    .text(`Relatório Financeiro • ${ctx.month}`, margin, 14, { width: pageW - margin * 2 });
+
+  doc
+    .fillColor("#cbd5e1")
+    .font("Helvetica")
+    .fontSize(9)
+    .text(`Base DRE: ${ctx.basisLabel}`, margin, 30, { width: pageW - margin * 2 });
+
+  return 60; // y inicial recomendado após mini header
+}
+
+function ensureSpace(doc, y, needed, ctx, withMiniHeader = true) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  if (y + needed <= bottom) return y;
+
+  doc.addPage();
+  return withMiniHeader ? drawMiniHeader(doc, ctx) : doc.page.margins.top;
+}
+
+function sectionBox(doc, x, y, w, h, title) {
+  doc.roundedRect(x, y, w, h, 12).fillAndStroke("#ffffff", "#e6eaf2");
+
+  if (title) {
+    doc
+      .fillColor("#0f172a")
+      .font("Helvetica-Bold")
+      .fontSize(12)
+      .text(title, x + 12, y + 10, { width: w - 24 });
+  }
+
+  return { x: x + 12, y: y + (title ? 32 : 12), w: w - 24, h: h - (title ? 44 : 24) };
+}
+
+function textEllipsis(doc, text, x, y, w, opts = {}) {
+  doc.text(String(text ?? ""), x, y, {
+    width: w,
+    lineBreak: false,
+    ellipsis: true,
+    ...opts,
+  });
+}
+
+function drawCardsRow(doc, y, cards) {
+  const pageW = doc.page.width;
+  const margin = doc.page.margins.left;
+
+  const gap = 10;
+  const cols = 3;
+  const w = (pageW - margin * 2 - gap * (cols - 1)) / cols;
+  const h = 64;
+
+  cards.forEach((c, i) => {
+    const x = margin + i * (w + gap);
+    doc.roundedRect(x, y, w, h, 12).fillAndStroke("#f8fafc", "#e6eaf2");
+
+    doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(10);
+    textEllipsis(doc, c.title, x + 12, y + 10, w - 24);
+
+    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14);
+    textEllipsis(doc, c.value, x + 12, y + 30, w - 24);
+
+    if (c.foot) {
+      doc.fillColor("#94a3b8").font("Helvetica").fontSize(9);
+      textEllipsis(doc, c.foot, x + 12, y + 50, w - 24);
+    }
+  });
+
+  return y + h + 18;
+}
+
+function drawKeyValueRows(doc, x, y, w, rows) {
+  const rowH = 16;
+  rows.forEach((r, idx) => {
+    const yy = y + idx * rowH;
+
+    doc.fillColor("#0f172a").font("Helvetica").fontSize(11);
+    textEllipsis(doc, r.label, x, yy, w - 190);
+
+    doc.fillColor("#0f172a").font(r.bold ? "Helvetica-Bold" : "Helvetica").fontSize(11);
+    doc.text(r.value, x + (w - 180), yy, { width: 180, align: "right", lineBreak: false, ellipsis: true });
+  });
+
+  return y + rows.length * rowH;
+}
+
+function drawTableHeader(doc, x, y, cols, colW) {
+  doc.rect(x, y, colW.reduce((a, b) => a + b, 0), 22).fill("#f8fafc");
+  doc.strokeColor("#e6eaf2").lineWidth(1).rect(x, y, colW.reduce((a, b) => a + b, 0), 22).stroke();
+
+  doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(10);
+
+  let xx = x;
+  cols.forEach((c, i) => {
+    const w = colW[i];
+    doc.text(c, xx + 8, y + 6, { width: w - 16, lineBreak: false, ellipsis: true });
+    xx += w;
+  });
+
+  return y + 22;
+}
+
+function drawTableRow(doc, x, y, cells, colW, rowH = 18, rightAlignIdx = []) {
+  doc.strokeColor("#eef2f7").lineWidth(1).moveTo(x, y + rowH).lineTo(x + colW.reduce((a, b) => a + b, 0), y + rowH).stroke();
+
+  doc.fillColor("#0f172a").font("Helvetica").fontSize(10);
+
+  let xx = x;
+  cells.forEach((txt, i) => {
+    const w = colW[i];
+    const isRight = rightAlignIdx.includes(i);
+    doc.text(String(txt ?? ""), xx + 8, y + 4, {
+      width: w - 16,
+      align: isRight ? "right" : "left",
+      lineBreak: false,
+      ellipsis: true,
+    });
+    xx += w;
+  });
+
+  return y + rowH;
 }
 
 async function reportPackPdf(req, res) {
@@ -506,7 +631,9 @@ async function reportPackPdf(req, res) {
     return res.status(status).json({ message: e.message || "Erro ao gerar PDF." });
   }
 
-  // headers
+  const basisLabel = basis === "paid" ? "REAL (pagamento)" : "PROJETADO (vencimento)";
+  const ctx = { month, basisLabel };
+
   const filename = `Relatorio_${month}.pdf`;
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -517,173 +644,184 @@ async function reportPackPdf(req, res) {
   const pageW = doc.page.width;
   const margin = doc.page.margins.left;
 
-  // Header
-  doc.rect(0, 0, pageW, 90).fill("#0866ff");
+  // Header principal
+  doc.rect(0, 0, pageW, 92).fill("#0866ff");
   doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(20).text("Relatório Financeiro", margin, 28, { width: pageW - margin * 2 });
   doc.fillColor("#dbeafe").font("Helvetica").fontSize(11).text(
-    `Período: ${month} • Base DRE: ${basis === "paid" ? "REAL (pagamento)" : "PROJETADO (vencimento)"}`,
+    `Período: ${month} • Base DRE: ${basisLabel}`,
     margin,
-    56,
+    58,
     { width: pageW - margin * 2 }
   );
 
   doc.fillColor("#0f172a");
   let y = 110;
 
-  // Resumo
-  doc.font("Helvetica-Bold").fontSize(14).text("Resumo do período", margin, y);
-  y += 14;
-  doc.font("Helvetica").fontSize(10).fillColor("#64748b").text("Receitas e despesas (base REAL - paidAt) + saldo líquido.", margin, y);
-  doc.fillColor("#0f172a");
-  y += 18;
+  // ===== Resumo (cards fixos e alinhados) =====
+  y = ensureSpace(doc, y, 120, ctx, false);
 
-  // Cards (simples)
-  const cardW = (pageW - margin * 2 - 16) / 3;
-  const cardH = 56;
-  const cardY = y;
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("Resumo do período", margin, y);
+  y += 16;
+  doc.fillColor("#64748b").font("Helvetica").fontSize(10).text("Receitas e despesas (base REAL - paidAt) + saldo líquido.", margin, y);
+  y += 16;
 
-  const cards = [
-    { t: "Receitas", v: moneyBRL(pack.summary.revenueCents) },
-    { t: "Despesas", v: moneyBRL(pack.summary.expensesCents) },
-    { t: "Saldo líquido", v: moneyBRL(pack.summary.netCents) },
-  ];
+  y = drawCardsRow(doc, y, [
+    { title: "Receitas", value: moneyBRL(pack.summary.revenueCents) },
+    { title: "Despesas", value: moneyBRL(pack.summary.expensesCents) },
+    { title: "Saldo líquido", value: moneyBRL(pack.summary.netCents) },
+  ]);
 
-  cards.forEach((c, i) => {
-    const x = margin + i * (cardW + 8);
-    doc.roundedRect(x, cardY, cardW, cardH, 10).fillAndStroke("#f8fafc", "#e6eaf2");
-    doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(10).text(c.t, x + 12, cardY + 10, { width: cardW - 24 });
-    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text(c.v, x + 12, cardY + 28, { width: cardW - 24 });
-  });
+  // ===== DRE (dentro de box com altura fixa e espaçamento correto) =====
+  y = ensureSpace(doc, y, 210, ctx, false);
 
-  y += cardH + 18;
-
-  // DRE
   doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("DRE (Demonstrativo de Resultado)", margin, y);
-  y += 18;
+  y += 14;
 
-  doc.roundedRect(margin, y, pageW - margin * 2, 150, 10).stroke("#e6eaf2");
-  y += 10;
+  const dreBoxH = 150;
+  const dreBox = sectionBox(doc, margin, y, pageW - margin * 2, dreBoxH, null);
 
-  const xL = margin + 12;
-  const xR = pageW - margin - 12;
+  drawKeyValueRows(doc, dreBox.x, dreBox.y, dreBox.w, [
+    { label: "Receita do período", value: moneyBRL(pack.dre.revenueCents) },
+    { label: "CMV / Custos variáveis", value: moneyBRL(pack.dre.variableCostsCents) },
+    { label: "Lucro bruto", value: moneyBRL(pack.dre.grossProfitCents), bold: true },
+    { label: "Custos fixos", value: moneyBRL(pack.dre.fixedCostsCents) },
+    { label: "Lucro operacional", value: moneyBRL(pack.dre.operatingProfitCents), bold: true },
+    { label: "Margem", value: `${Number(pack.dre.marginPct || 0).toFixed(2)}%`, bold: true },
+  ]);
 
-  drawRow(doc, "Receita do período", moneyBRL(pack.dre.revenueCents), xL, xR, y);
-  y += 16;
-  drawRow(doc, "CMV / Custos variáveis (Pagáveis + Variáveis)", moneyBRL(pack.dre.variableCostsCents), xL, xR, y);
-  y += 16;
-  drawRow(doc, "Lucro bruto", moneyBRL(pack.dre.grossProfitCents), xL, xR, y, { bold: true });
-  y += 16;
-  drawRow(doc, "Custos fixos", moneyBRL(pack.dre.fixedCostsCents), xL, xR, y);
-  y += 16;
-  drawRow(doc, "Lucro operacional", moneyBRL(pack.dre.operatingProfitCents), xL, xR, y, { bold: true });
-  y += 16;
-  drawRow(doc, "Margem", `${Number(pack.dre.marginPct || 0).toFixed(2)}%`, xL, xR, y, { bold: true });
+  y = y + dreBoxH + 18;
 
-  y += 28;
+  // ===== DFC (2 boxes alinhados) =====
+  y = ensureSpace(doc, y, 160, ctx, false);
 
-  // DFC
   doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("DFC (Fluxo de Caixa)", margin, y);
-  y += 18;
-
-  const boxW = (pageW - margin * 2 - 10) / 2;
-  const boxH = 95;
-
-  const dfcBoxes = [
-    { title: "Real (paidAt)", data: pack.dfc.real },
-    { title: "Projetado (dueDate)", data: pack.dfc.projected },
-  ];
-
-  dfcBoxes.forEach((b, i) => {
-    const x = margin + i * (boxW + 10);
-    doc.roundedRect(x, y, boxW, boxH, 10).fillAndStroke("#ffffff", "#e6eaf2");
-    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(11).text(b.title, x + 12, y + 10);
-    doc.fillColor("#64748b").font("Helvetica").fontSize(10).text(`Saldo inicial: ${moneyBRL(b.data.initialBalanceCents)}`, x + 12, y + 30);
-    doc.text(`Entradas: ${moneyBRL(b.data.inCents)}`, x + 12, y + 45);
-    doc.text(`Saídas: ${moneyBRL(b.data.outCents)}`, x + 12, y + 60);
-    doc.fillColor("#0f172a").font("Helvetica-Bold").text(`Saldo final: ${moneyBRL(b.data.finalBalanceCents)}`, x + 12, y + 76);
-  });
-
-  y += boxH + 18;
-
-  // Próximos 7/15/30
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Próximos vencimentos (resumo)", margin, y);
   y += 14;
 
-  const up = [
-    { d: "7 dias", v: pack.upcoming.d7 },
-    { d: "15 dias", v: pack.upcoming.d15 },
-    { d: "30 dias", v: pack.upcoming.d30 },
-  ];
+  const gap = 10;
+  const boxW = (pageW - margin * 2 - gap) / 2;
+  const boxH = 105;
 
-  up.forEach((u) => {
-    doc.fillColor("#64748b").font("Helvetica").fontSize(10).text(
-      `${u.d}: A receber ${moneyBRL(u.v.toReceiveCents)} • A pagar ${moneyBRL(u.v.toPayCents)}`,
-      margin,
-      y
-    );
-    y += 12;
-  });
+  const real = pack.dfc.real;
+  const proj = pack.dfc.projected;
 
+  const b1 = sectionBox(doc, margin, y, boxW, boxH, "Real (paidAt)");
+  drawKeyValueRows(doc, b1.x, b1.y, b1.w, [
+    { label: "Saldo inicial", value: moneyBRL(real.initialBalanceCents) },
+    { label: "Entradas", value: moneyBRL(real.inCents) },
+    { label: "Saídas", value: moneyBRL(real.outCents) },
+    { label: "Saldo final", value: moneyBRL(real.finalBalanceCents), bold: true },
+  ]);
+
+  const b2 = sectionBox(doc, margin + boxW + gap, y, boxW, boxH, "Projetado (dueDate)");
+  drawKeyValueRows(doc, b2.x, b2.y, b2.w, [
+    { label: "Saldo inicial", value: moneyBRL(proj.initialBalanceCents) },
+    { label: "Entradas", value: moneyBRL(proj.inCents) },
+    { label: "Saídas", value: moneyBRL(proj.outCents) },
+    { label: "Saldo final", value: moneyBRL(proj.finalBalanceCents), bold: true },
+  ]);
+
+  y = y + boxH + 18;
+
+  // ===== Próximos vencimentos (tabela dentro de box) =====
+  y = ensureSpace(doc, y, 140, ctx, false);
+
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Próximos vencimentos (resumo)", margin, y);
+  y += 12;
+
+  const upBoxH = 98;
+  const upBox = sectionBox(doc, margin, y, pageW - margin * 2, upBoxH, null);
+
+  const cols = ["Janela", "A receber", "A pagar"];
+  const colW = [140, (upBox.w - 140) / 2, (upBox.w - 140) / 2];
+
+  let ty = drawTableHeader(doc, upBox.x, upBox.y, cols, colW);
+  ty = drawTableRow(doc, upBox.x, ty, ["7 dias", moneyBRL(pack.upcoming.d7.toReceiveCents), moneyBRL(pack.upcoming.d7.toPayCents)], colW, 18, [1, 2]);
+  ty = drawTableRow(doc, upBox.x, ty, ["15 dias", moneyBRL(pack.upcoming.d15.toReceiveCents), moneyBRL(pack.upcoming.d15.toPayCents)], colW, 18, [1, 2]);
+  drawTableRow(doc, upBox.x, ty, ["30 dias", moneyBRL(pack.upcoming.d30.toReceiveCents), moneyBRL(pack.upcoming.d30.toPayCents)], colW, 18, [1, 2]);
+
+  y = y + upBoxH + 18;
+
+  // ===== Movimentos vencidos (tabela paginada, nada “solto”) =====
+  y = ensureSpace(doc, y, 120, ctx, false);
+
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Movimentos vencidos (em aberto)", margin, y);
   y += 10;
 
-  // Vencidos + Últimas transações (pode quebrar de página)
-  const ensureSpace = (needed) => {
-    const bottom = doc.page.height - doc.page.margins.bottom;
-    if (y + needed > bottom) {
-      doc.addPage();
-      y = doc.page.margins.top;
-    }
-  };
+  const overdueCols = ["Venc.", "Tipo", "Descrição", "Valor"];
+  const overdueW = [70, 80, (pageW - margin * 2) - (70 + 80 + 110), 110];
+  let oy = y;
 
-  ensureSpace(180);
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Movimentos vencidos (em aberto)", margin, y);
-  y += 14;
+  oy = ensureSpace(doc, oy, 80, ctx, false);
+  oy = drawTableHeader(doc, margin, oy, overdueCols, overdueW);
 
-  const venc = (pack.overdue.items || []).slice(0, 10);
-  if (!venc.length) {
-    doc.fillColor("#64748b").font("Helvetica").fontSize(10).text("Nenhum movimento vencido encontrado.", margin, y);
-    y += 14;
+  const overdueItems = (pack.overdue.items || []).slice(0, 25);
+  if (!overdueItems.length) {
+    oy = drawTableRow(doc, margin, oy, ["—", "—", "Nenhum vencido encontrado", moneyBRL(0)], overdueW, 18, [3]);
   } else {
-    venc.forEach((it) => {
-      doc.fillColor("#0f172a").font("Helvetica").fontSize(10).text(
-        `${fmtBR(it.dueDate)} • ${it.kind} • ${it.subtitle} • ${moneyBRL(it.amountCents)}`,
+    for (const it of overdueItems) {
+      oy = ensureSpace(doc, oy, 26, ctx, true);
+      if (oy === 60) {
+        // nova página: redesenha o cabeçalho da tabela
+        doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Movimentos vencidos (em aberto)", margin, 74);
+        oy = drawTableHeader(doc, margin, 98, overdueCols, overdueW);
+      }
+
+      oy = drawTableRow(
+        doc,
         margin,
-        y,
-        { width: pageW - margin * 2 }
+        oy,
+        [fmtBR(it.dueDate), it.kind, it.subtitle || it.title || "—", moneyBRL(it.amountCents || 0)],
+        overdueW,
+        18,
+        [3]
       );
-      y += 12;
-    });
+    }
   }
 
-  y += 10;
-  ensureSpace(200);
+  y = oy + 18;
+
+  // ===== Últimas transações (tabela paginada) =====
+  y = ensureSpace(doc, y, 110, ctx, false);
 
   doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Últimas transações do período", margin, y);
-  y += 14;
+  y += 10;
 
-  const tx = (pack.lastTransactions || []).slice(0, 12);
-  if (!tx.length) {
-    doc.fillColor("#64748b").font("Helvetica").fontSize(10).text("Sem transações no período.", margin, y);
-    y += 14;
+  const txCols = ["Data", "Origem", "Nome", "Valor"];
+  const txW = [70, 90, (pageW - margin * 2) - (70 + 90 + 110), 110];
+
+  let py = y;
+  py = drawTableHeader(doc, margin, py, txCols, txW);
+
+  const txItems = (pack.lastTransactions || []).slice(0, 30);
+  if (!txItems.length) {
+    py = drawTableRow(doc, margin, py, ["—", "—", "Sem transações no período", moneyBRL(0)], txW, 18, [3]);
   } else {
-    tx.forEach((t) => {
+    for (const t of txItems) {
+      py = ensureSpace(doc, py, 26, ctx, true);
+      if (py === 60) {
+        doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Últimas transações do período", margin, 74);
+        py = drawTableHeader(doc, margin, 98, txCols, txW);
+      }
+
       const sign = t.type === "IN" ? "+" : "-";
-      doc.fillColor("#0f172a").font("Helvetica").fontSize(10).text(
-        `${fmtBR(t.occurredAt)} • ${t.source} • ${t.name} • ${sign}${moneyBRL(t.amountCents)}`,
+      py = drawTableRow(
+        doc,
         margin,
-        y,
-        { width: pageW - margin * 2 }
+        py,
+        [fmtBR(t.occurredAt), t.source, t.name, `${sign}${moneyBRL(t.amountCents || 0)}`],
+        txW,
+        18,
+        [3]
       );
-      y += 12;
-    });
+    }
   }
 
   // Footer
-  ensureSpace(40);
+  const footerY = doc.page.height - doc.page.margins.bottom - 12;
   doc.fillColor("#94a3b8").font("Helvetica").fontSize(9).text(
     `Gerado em ${fmtBR(pack.meta.generatedAt)} • Marcenaria SaaS`,
     margin,
-    doc.page.height - doc.page.margins.bottom - 12,
+    footerY,
     { width: pageW - margin * 2, align: "center" }
   );
 
