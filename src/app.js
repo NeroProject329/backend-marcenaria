@@ -14,8 +14,12 @@ const ordersRoutes = require("./routes/orders.routes");
 const receivablesRoutes = require("./routes/receivables.routes");
 const payablesRoutes = require("./routes/payables.routes");
 const costsRoutes = require("./routes/costs.routes");
-const employeesRoutes = require("./routes/employees.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
+const budgetsRoutes = require("./routes/budgets.routes");
+const materialsRoutes = require("./routes/materials.routes");
+
+// ✅ NOVO: Funcionários
+const employeesRoutes = require("./routes/employees.routes");
 
 const app = express();
 app.use(cors());
@@ -35,7 +39,11 @@ app.use("/api/orders", ordersRoutes);
 app.use("/api/receivables", receivablesRoutes);
 app.use("/api/payables", payablesRoutes);
 app.use("/api/costs", costsRoutes);
-app.use("/api/employees", employeesRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/budgets", budgetsRoutes);
+app.use("/api/materials", materialsRoutes);
+
+// ✅ NOVO: endpoint do módulo Funcionários
+app.use("/api/employees", employeesRoutes);
 
 module.exports = { app };
