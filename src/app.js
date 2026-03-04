@@ -29,9 +29,15 @@ const reportsExtraRoutes = require("./routes/reportsExtra.routes");
 // ✅ SAAS-P2: Billing (checkout AbacatePay)
 const billingRoutes = require("./routes/billing.routes");
 
+// ✅ SAAS-P3 Webhooks (RAW)
+const webhooksRoutes = require("./routes/webhooks.routes");
+
 
 const app = express();
 app.use(cors());
+
+app.use("/api/webhooks", webhooksRoutes);
+
 app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ ok: true }));
