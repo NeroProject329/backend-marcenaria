@@ -24,6 +24,8 @@ const employeesRoutes = require("./routes/employees.routes");
 // ✅ NOVO
 const reportsRoutes = require("./routes/reports.routes");
 
+const reportsExtraRoutes = require("./routes/reportsExtra.routes");
+
 
 const app = express();
 app.use(cors());
@@ -53,5 +55,7 @@ app.use("/api/employees", employeesRoutes);
 
 // ✅ NOVO
 app.use("/api/reports", reportsRoutes);
+
+app.use("/api/reports", reportsExtraRoutes);
 
 module.exports = { app };
