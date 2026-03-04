@@ -9,10 +9,35 @@ const { requireAdminAuth } = require("../middlewares/adminAuth.middleware");
  */
 router.use(requireAdminAuth);
 
+const {
+  listTenants,
+  getTenant,
+  listTenantBillings,
+  setTenantOverride,
+  removeTenantOverride,
+  extendTenant,
+  metrics,
+} = require("../controllers/adminTenants.controller");
+
 /**
- * (mantido pra DEV) POST /api/admin/dev/set-plan
- * Body: { salonId, plan: "FREE"|"PRO"|"PREMIUM" }
+ * Rotas internas do painel Admin (SaaS)
+ * Tudo aqui exige admin autenticado.
  */
+router.use(requireAdminAuth);
+
+// --------- Metrics ----------
+router.get("/metrics", metrics);
+
+// --------- Tenants ----------
+router.get("/tenants", listTenants);
+router.get("/tenants/:id", getTenant);
+router.get("/tenants/:id/billings", listTenantBillings);
+
+router.post("/tenants/:id/override", setTenantOverride);
+router.post("/tenants/:id/override/remove", removeTenantOverride);
+router.post("/tenants/:id/extend", extendTenant);
+
+
 router.post("/dev/set-plan", async (req, res) => {
   const targetSalonId = req.body?.salonId;
   const plan = String(req.body?.plan || "").toUpperCase();
