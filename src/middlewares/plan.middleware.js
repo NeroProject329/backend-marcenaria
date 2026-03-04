@@ -1,26 +1,12 @@
+// src/middlewares/plan.middleware.js
 const { prisma } = require("../lib/prisma");
 
 const PLAN_ORDER = ["FREE", "PRO", "PREMIUM"];
 
 const LIMITS = {
-  FREE: {
-    services: 10,
-    clients: 100,
-    appointmentsMonth: 200,
-    finance: false,
-  },
-  PRO: {
-    services: 50,
-    clients: 2000,
-    appointmentsMonth: 2000,
-    finance: true,
-  },
-  PREMIUM: {
-    services: 999999,
-    clients: 999999,
-    appointmentsMonth: 999999,
-    finance: true,
-  },
+  FREE: { services: 10, clients: 100, appointmentsMonth: 200, finance: false },
+  PRO: { services: 50, clients: 2000, appointmentsMonth: 2000, finance: true },
+  PREMIUM: { services: 999999, clients: 999999, appointmentsMonth: 999999, finance: true },
 };
 
 function planAtLeast(current, required) {
@@ -32,55 +18,116 @@ function planAtLeast(current, required) {
 async function loadSalonPlan(salonId) {
   return prisma.salon.findUnique({
     where: { id: salonId },
-    select: { plan: true, planStatus: true, planEndsAt: true, trialEndsAt: true },
+    select: {
+      plan: true,
+      planStatus: true,
+      planEndsAt: true,
+      trialEndsAt: true,
+
+      cancelAtPeriodEnd: true,
+      cancelRequestedAt: true,
+
+      planOverrideEnabled: true,
+      planOverridePlan: true,
+      planOverrideEndsAt: true,
+      planOverrideReason: true,
+    },
   });
 }
 
-// ✅ exige plano mínimo
+function resolveAccess(salon) {
+  const now = new Date();
+
+  const basePlan = String(salon?.plan || "FREE").toUpperCase();
+  const planStatus = String(salon?.planStatus || "ACTIVE").toUpperCase();
+
+  // ✅ Override tem prioridade total
+  const overrideEnabled = !!salon?.planOverrideEnabled;
+  const overridePlan = String(salon?.planOverridePlan || basePlan).toUpperCase();
+  const overrideEndsAt = salon?.planOverrideEndsAt ? new Date(salon.planOverrideEndsAt) : null;
+
+  const overrideActive = overrideEnabled && (!overrideEndsAt || overrideEndsAt >= now);
+
+  if (overrideActive) {
+    return {
+      ok: true,
+      plan: overridePlan,
+      source: "OVERRIDE",
+      endsAt: overrideEndsAt,
+      cancelAtPeriodEnd: false,
+    };
+  }
+
+  // (trial se existir e estiver ativo, libera — sem inventar plano novo)
+  const trialEndsAt = salon?.trialEndsAt ? new Date(salon.trialEndsAt) : null;
+  const trialActive = !!trialEndsAt && trialEndsAt >= now;
+
+  // status
+  if (!trialActive && planStatus !== "ACTIVE") {
+    return { ok: false, code: 402, message: "Assinatura inativa. Regularize para continuar." };
+  }
+
+  // expiração
+  const endsAt = salon?.planEndsAt ? new Date(salon.planEndsAt) : null;
+  if (!trialActive && endsAt && endsAt < now) {
+    return { ok: false, code: 402, message: "Assinatura expirada. Renove para continuar." };
+  }
+
+  return {
+    ok: true,
+    plan: basePlan,
+    source: trialActive ? "TRIAL" : "SUBSCRIPTION",
+    endsAt,
+    cancelAtPeriodEnd: !!salon?.cancelAtPeriodEnd,
+  };
+}
+
+// ✅ exige plano mínimo (mas também valida expiração/override)
 function requirePlan(minPlan = "FREE") {
   return async (req, res, next) => {
     try {
       const { salonId } = req.user;
       const salon = await loadSalonPlan(salonId);
-
       if (!salon) return res.status(404).json({ message: "Salão não encontrado." });
 
-      // status
-      if (salon.planStatus && salon.planStatus !== "ACTIVE") {
-        return res.status(402).json({ message: "Assinatura inativa. Regularize para continuar." });
-      }
+      const access = resolveAccess(salon);
+      if (!access.ok) return res.status(access.code || 402).json({ message: access.message });
 
-      // expiração (se você usar planEndsAt)
-      if (salon.planEndsAt && new Date(salon.planEndsAt) < new Date()) {
-        return res.status(402).json({ message: "Assinatura expirada. Renove para continuar." });
-      }
-
-      if (!planAtLeast(salon.plan, minPlan)) {
+      if (!planAtLeast(access.plan, minPlan)) {
         return res.status(403).json({ message: `Recurso disponível a partir do plano ${minPlan}.` });
       }
 
-      req.plan = String(salon.plan || "FREE").toUpperCase();
-      next();
-    } catch (e) {
+      req.plan = access.plan;
+      req.planAccess = access;
+      return next();
+    } catch {
       return res.status(500).json({ message: "Erro ao validar plano." });
     }
   };
 }
 
-// ✅ limita por quantidade (services/clients) e agendamentos por mês
+// ✅ limita por quantidade + também valida expiração/override
 function checkLimit(kind) {
   return async (req, res, next) => {
     try {
       const { salonId } = req.user;
+
       const salon = await loadSalonPlan(salonId);
       if (!salon) return res.status(404).json({ message: "Salão não encontrado." });
 
-      const plan = String(salon.plan || "FREE").toUpperCase();
+      const access = resolveAccess(salon);
+      if (!access.ok) return res.status(access.code || 402).json({ message: access.message });
+
+      const plan = access.plan;
       const conf = LIMITS[plan] || LIMITS.FREE;
 
-      // finance gate (opcional)
+      req.plan = plan;
+      req.planAccess = access;
+
       if (kind === "finance") {
-        if (!conf.finance) return res.status(403).json({ message: "Financeiro disponível apenas no Pro." });
+        if (!conf.finance) {
+          return res.status(403).json({ message: "Financeiro disponível apenas no Pro." });
+        }
         return next();
       }
 
@@ -118,7 +165,7 @@ function checkLimit(kind) {
       }
 
       return next();
-    } catch (e) {
+    } catch {
       return res.status(500).json({ message: "Erro ao validar limites do plano." });
     }
   };

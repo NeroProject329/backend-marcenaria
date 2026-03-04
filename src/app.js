@@ -40,6 +40,80 @@ app.use("/api/webhooks", webhooksRoutes);
 
 app.use(express.json());
 
+
+// ✅ Guard global: bloqueia SaaS expirado (mas deixa auth/billing/webhooks/me/admin)
+app.use("/api", async (req, res, next) => {
+  try {
+    const p = req.path || "";
+
+    // allowlist
+    if (
+      p.startsWith("/auth") ||
+      p.startsWith("/billing") ||
+      p.startsWith("/webhooks") ||
+      p.startsWith("/me") ||
+      p.startsWith("/admin")
+    ) {
+      return next();
+    }
+
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ message: "Sem token" });
+
+    let payload;
+    try {
+      payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch {
+      return res.status(401).json({ message: "Token inválido" });
+    }
+
+    // mantém compatibilidade com middlewares já existentes
+    req.user = payload; // { userId, salonId }
+
+    const salonId = payload?.salonId;
+    if (!salonId) return res.status(401).json({ message: "Sem salonId no token" });
+
+    const salon = await prisma.salon.findUnique({
+      where: { id: salonId },
+      select: {
+        planStatus: true,
+        planEndsAt: true,
+
+        cancelAtPeriodEnd: true,
+
+        planOverrideEnabled: true,
+        planOverridePlan: true,
+        planOverrideEndsAt: true,
+      },
+    });
+
+    if (!salon) return res.status(404).json({ message: "Salão não encontrado." });
+
+    const now = new Date();
+
+    // override tem prioridade
+    if (salon.planOverrideEnabled) {
+      const ends = salon.planOverrideEndsAt ? new Date(salon.planOverrideEndsAt) : null;
+      if (!ends || ends >= now) return next();
+    }
+
+    // status (cancelAtPeriodEnd não bloqueia)
+    if (salon.planStatus && String(salon.planStatus).toUpperCase() !== "ACTIVE") {
+      return res.status(402).json({ message: "Assinatura inativa. Regularize para continuar." });
+    }
+
+    if (salon.planEndsAt && new Date(salon.planEndsAt) < now) {
+      return res.status(402).json({ message: "Assinatura expirada. Renove para continuar." });
+    }
+
+    return next();
+  } catch {
+    return res.status(500).json({ message: "Erro ao validar acesso do SaaS." });
+  }
+});
+
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.use("/api/auth", authRoutes);

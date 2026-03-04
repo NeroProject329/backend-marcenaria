@@ -31,14 +31,11 @@ function getPriceCents(plan) {
 
 function normalizeMethods(methodsRaw) {
   if (!methodsRaw) return ["PIX"];
-
   const arr = Array.isArray(methodsRaw) ? methodsRaw : [methodsRaw];
   const normalized = arr.map((m) => toUpper(m)).filter(Boolean);
-
   const unique = Array.from(new Set(normalized));
   if (unique.length < 1 || unique.length > 2) return null;
   if (!unique.every((m) => VALID_METHODS.includes(m))) return null;
-
   return unique;
 }
 
@@ -47,23 +44,21 @@ function generateExternalId(prefix = "sb") {
   return `${prefix}_${Date.now()}_${rand}`;
 }
 
+// -----------------------------
 // POST /api/billing/checkout
+// -----------------------------
 async function checkout(req, res) {
-  // ✅ Guard pra não ficar erro “Cannot read properties...”
   if (!prisma?.saasBilling?.create) {
     return res.status(500).json({
       message:
         "Prisma Client no servidor não está atualizado (prisma.saasBilling undefined). " +
-        "Rode 'npx prisma generate' no build do Railway e redeploy com cache limpo.",
+        "Garanta 'prisma generate' no build do Railway e redeploy.",
     });
   }
 
   const salonId = req.user?.salonId;
   const userId = req.user?.userId;
-
-  if (!salonId || !userId) {
-    return res.status(401).json({ message: "Sem contexto do usuário (salonId/userId)." });
-  }
+  if (!salonId || !userId) return res.status(401).json({ message: "Sem contexto do usuário." });
 
   const plan = toUpper(req.body?.plan);
   if (!VALID_PLANS.includes(plan)) {
@@ -90,7 +85,6 @@ async function checkout(req, res) {
     });
   }
 
-  // Carrega salão + owner (pra preencher customer se não vier tudo no body)
   const salon = await prisma.salon.findUnique({
     where: { id: salonId },
     select: {
@@ -104,7 +98,6 @@ async function checkout(req, res) {
   if (!salon) return res.status(404).json({ message: "Salão não encontrado." });
 
   const bodyCustomer = req.body?.customer || {};
-
   const customer = {
     name: String(bodyCustomer.name || salon.owner?.name || salon.name || "").trim(),
     email: String(bodyCustomer.email || salon.owner?.email || "").trim(),
@@ -112,14 +105,11 @@ async function checkout(req, res) {
     taxId: String(bodyCustomer.taxId || req.body?.taxId || "").trim(),
   };
 
-  // ✅ AbacatePay: se enviar customer, os 4 campos são obrigatórios
-  // (name, cellphone, email, taxId). :contentReference[oaicite:0]{index=0}
   const missing = [];
   if (!customer.name) missing.push("customer.name");
   if (!customer.email) missing.push("customer.email");
   if (!customer.cellphone) missing.push("customer.cellphone");
   if (!customer.taxId) missing.push("customer.taxId");
-
   if (missing.length) {
     return res.status(400).json({
       message:
@@ -128,9 +118,8 @@ async function checkout(req, res) {
     });
   }
 
-  // ✅ Normaliza campos (evita erro por formatação)
+  // normaliza
   customer.taxId = digitsOnly(customer.taxId);
-  // mantém só dígitos e deixa com DDD
   const cellDigits = digitsOnly(customer.cellphone);
   customer.cellphone = cellDigits.length >= 10 ? cellDigits : customer.cellphone;
 
@@ -184,7 +173,6 @@ async function checkout(req, res) {
       },
     });
 
-    // ✅ AbacatePay billing/create usa methods PIX/CARD e frequency ONE_TIME :contentReference[oaicite:1]{index=1}
     const abacate = await createBilling({
       frequency: "ONE_TIME",
       methods,
@@ -217,17 +205,13 @@ async function checkout(req, res) {
       },
     });
 
-    return res.json({
-      checkoutUrl: updated.providerCheckoutUrl,
-      billing: updated,
-    });
+    return res.json({ checkoutUrl: updated.providerCheckoutUrl, billing: updated });
   } catch (e) {
     if (billingRow?.id) {
       try {
         await prisma.saasBilling.delete({ where: { id: billingRow.id } });
       } catch (_) {}
     }
-
     return res.status(400).json({
       message: "Falha ao criar checkout.",
       error: e?.message || String(e),
@@ -235,6 +219,84 @@ async function checkout(req, res) {
   }
 }
 
+// ----------------------------------
+// POST /api/billing/cancel
+// Cancela no fim do período (não bloqueia agora)
+// ----------------------------------
+async function cancelAtPeriodEnd(req, res) {
+  const salonId = req.user?.salonId;
+  if (!salonId) return res.status(401).json({ message: "Sem contexto do usuário." });
+
+  const salon = await prisma.salon.findUnique({
+    where: { id: salonId },
+    select: {
+      id: true,
+      plan: true,
+      planStatus: true,
+      planEndsAt: true,
+      cancelAtPeriodEnd: true,
+      cancelRequestedAt: true,
+    },
+  });
+
+  if (!salon) return res.status(404).json({ message: "Salão não encontrado." });
+
+  const now = new Date();
+  if (!salon.planEndsAt || new Date(salon.planEndsAt) < now) {
+    return res.status(400).json({ message: "Você não tem uma assinatura ativa para cancelar." });
+  }
+
+  if (salon.cancelAtPeriodEnd) {
+    return res.json({
+      ok: true,
+      cancelAtPeriodEnd: true,
+      cancelRequestedAt: salon.cancelRequestedAt,
+      planEndsAt: salon.planEndsAt,
+    });
+  }
+
+  const updated = await prisma.salon.update({
+    where: { id: salonId },
+    data: {
+      cancelAtPeriodEnd: true,
+      cancelRequestedAt: now,
+    },
+    select: {
+      cancelAtPeriodEnd: true,
+      cancelRequestedAt: true,
+      planEndsAt: true,
+    },
+  });
+
+  return res.json({ ok: true, ...updated });
+}
+
+// ----------------------------------
+// POST /api/billing/resume
+// Reativa (remove cancelamento agendado)
+// ----------------------------------
+async function resumeSubscription(req, res) {
+  const salonId = req.user?.salonId;
+  if (!salonId) return res.status(401).json({ message: "Sem contexto do usuário." });
+
+  const updated = await prisma.salon.update({
+    where: { id: salonId },
+    data: {
+      cancelAtPeriodEnd: false,
+      cancelRequestedAt: null,
+    },
+    select: {
+      cancelAtPeriodEnd: true,
+      cancelRequestedAt: true,
+      planEndsAt: true,
+    },
+  });
+
+  return res.json({ ok: true, ...updated });
+}
+
 module.exports = {
   checkout,
+  cancelAtPeriodEnd,
+  resumeSubscription,
 };
