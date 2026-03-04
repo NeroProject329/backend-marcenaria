@@ -9,7 +9,6 @@ function parseISO(v) {
 }
 
 function parseDateOnlySP(v) {
-  // aceita YYYY-MM-DD e cria 00:00 no fuso -03 (compatível com <input type="date">)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ""))) return null;
   return new Date(`${v}T00:00:00-03:00`);
 }
@@ -23,7 +22,6 @@ function monthRangeUTC(monthStr) {
 }
 
 function periodFromQuery(q) {
-  // 1) month=YYYY-MM
   if (q.month) {
     const month = String(q.month).trim();
     if (!/^\d{4}-\d{2}$/.test(month)) return { ok: false, message: "month inválido. Use YYYY-MM" };
@@ -32,20 +30,17 @@ function periodFromQuery(q) {
     return { ok: true, mode: "month", month, from: r.from, to: r.to };
   }
 
-  // 2) dateFrom/dateTo (YYYY-MM-DD)
   if (q.dateFrom || q.dateTo) {
     const df = parseDateOnlySP(q.dateFrom);
     const dt0 = parseDateOnlySP(q.dateTo);
     if (!df || !dt0) return { ok: false, message: "dateFrom/dateTo inválidos. Use YYYY-MM-DD" };
 
-    // dateTo inclusivo -> transforma em exclusivo (+1 dia)
     const to = new Date(dt0.getTime() + 24 * 60 * 60 * 1000);
     if (df >= to) return { ok: false, message: "Intervalo inválido: dateFrom precisa ser menor que dateTo" };
 
     return { ok: true, mode: "range", dateFrom: String(q.dateFrom), dateTo: String(q.dateTo), from: df, to };
   }
 
-  // 3) compat: from/to ISO
   if (q.from || q.to) {
     const from = q.from ? parseISO(q.from) : null;
     const to = q.to ? parseISO(q.to) : null;
@@ -97,8 +92,7 @@ function monthsCoveredSP(from, toExclusive) {
 }
 
 function getCurrentYmSP() {
-  const now = new Date();
-  return monthKeyFromDateSP(now);
+  return monthKeyFromDateSP(new Date());
 }
 
 function parseBasis(q) {
@@ -109,7 +103,13 @@ function parseBasis(q) {
 
 function pct(n, d) {
   if (!d || d <= 0) return 0;
-  return Math.round((n / d) * 10000) / 100; // 2 casas
+  return Math.round((n / d) * 10000) / 100;
+}
+
+function clamp(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.min(Math.max(x, min), max);
 }
 
 // --------------------
@@ -244,6 +244,10 @@ async function ensureRecurringForRange(salonId, from, toExclusive) {
   }
 }
 
+async function ensureRecurringForMonths(salonId, months) {
+  for (const m of months) await ensureRecurringMonth(salonId, m);
+}
+
 // --------------------
 // Cálculos base (Real/Projetado)
 // --------------------
@@ -370,7 +374,7 @@ async function calcCashSeries({ salonId, from, to, basis }) {
         basis === "paid"
           ? { receivable: { salonId }, status: "PAGO", paidAt: { gte: from, lt: to } }
           : { receivable: { salonId }, dueDate: { gte: from, lt: to }, status: { not: "CANCELADO" } },
-      select: { dueDate: true, paidAt: true, amountCents: true, status: true },
+      select: { dueDate: true, paidAt: true, amountCents: true },
     }),
 
     prisma.payableInstallment.findMany({
@@ -378,7 +382,7 @@ async function calcCashSeries({ salonId, from, to, basis }) {
         basis === "paid"
           ? { payable: { salonId }, status: "PAGO", paidAt: { gte: from, lt: to } }
           : { payable: { salonId }, dueDate: { gte: from, lt: to }, status: { not: "CANCELADO" } },
-      select: { dueDate: true, paidAt: true, amountCents: true, status: true },
+      select: { dueDate: true, paidAt: true, amountCents: true },
     }),
 
     prisma.cost.findMany({
@@ -428,16 +432,11 @@ async function calcCashSeries({ salonId, from, to, basis }) {
 }
 
 // --------------------
-// DRE (novo)
+// DRE
 // --------------------
 async function sumMaterialsPurchases({ salonId, from, to }) {
-  // Aproximação “concorrente”: compras/entradas de material no período
   const moves = await prisma.materialMovement.findMany({
-    where: {
-      salonId,
-      type: "IN",
-      occurredAt: { gte: from, lt: to },
-    },
+    where: { salonId, type: "IN", occurredAt: { gte: from, lt: to } },
     select: { qty: true, unitCostCents: true },
   });
 
@@ -452,12 +451,7 @@ async function sumMaterialsPurchases({ salonId, from, to }) {
 
 async function sumCostsByType({ salonId, from, to, type }) {
   const agg = await prisma.cost.aggregate({
-    where: {
-      salonId,
-      type,
-      occurredAt: { gte: from, lt: to },
-      ...nonStockCostsWhere(),
-    },
+    where: { salonId, type, occurredAt: { gte: from, lt: to }, ...nonStockCostsWhere() },
     _sum: { amountCents: true },
   });
   return agg._sum.amountCents || 0;
@@ -491,7 +485,6 @@ async function calcDre({ salonId, from, to, basis }) {
   };
 }
 
-// GET /api/reports/dre?month=YYYY-MM|dateFrom/dateTo|from/to&basis=due|paid
 async function reportsDre(req, res) {
   const { salonId } = req.user;
 
@@ -518,14 +511,13 @@ async function reportsDre(req, res) {
   });
 }
 
-// GET /api/reports/dre/series?months=6&endMonth=YYYY-MM&basis=due|paid
 async function reportsDreSeries(req, res) {
   const { salonId } = req.user;
 
   const b = parseBasis(req.query);
   if (!b.ok) return res.status(400).json({ message: b.message });
 
-  const months = Math.min(Math.max(Number(req.query.months || 6), 1), 24);
+  const months = clamp(req.query.months || 6, 1, 24);
 
   let endMonth = req.query.endMonth ? String(req.query.endMonth).trim() : null;
   if (endMonth && !/^\d{4}-\d{2}$/.test(endMonth)) {
@@ -563,9 +555,7 @@ async function reportsDreSeries(req, res) {
 }
 
 // --------------------
-// 1) DFC (Real + Projetado)
-// GET /api/reports/dfc?month=YYYY-MM
-// GET /api/reports/dfc?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD
+// DFC (Real + Projetado)
 // --------------------
 async function reportsDfc(req, res) {
   const { salonId } = req.user;
@@ -624,8 +614,7 @@ async function reportsDfc(req, res) {
 }
 
 // --------------------
-// 2) Upcoming (7/15/30) — a receber/a pagar
-// GET /api/reports/upcoming?days=7,15,30&limit=50
+// Upcoming (7/15/30)
 // --------------------
 function startOfDaySP(date = new Date()) {
   const ymd = new Intl.DateTimeFormat("en-CA", {
@@ -653,7 +642,7 @@ async function reportsUpcoming(req, res) {
   const { salonId } = req.user;
 
   const daysList = parseDaysParam(req.query.days);
-  const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 200);
+  const limit = clamp(req.query.limit || 50, 1, 200);
 
   const start = startOfDaySP(new Date());
   const maxDays = daysList.length ? daysList[daysList.length - 1] : 30;
@@ -686,11 +675,7 @@ async function reportsUpcoming(req, res) {
       }),
 
       prisma.cost.aggregate({
-        where: {
-          salonId,
-          occurredAt: { gte: from, lt: to },
-          ...nonStockCostsWhere(),
-        },
+        where: { salonId, occurredAt: { gte: from, lt: to }, ...nonStockCostsWhere() },
         _sum: { amountCents: true },
       }),
     ]);
@@ -715,9 +700,7 @@ async function reportsUpcoming(req, res) {
           amountCents: true,
           status: true,
           receivable: {
-            select: {
-              order: { select: { id: true, client: { select: { id: true, name: true } } } },
-            },
+            select: { order: { select: { id: true, client: { select: { id: true, name: true } } } } },
           },
         },
       }),
@@ -737,21 +720,13 @@ async function reportsUpcoming(req, res) {
           amountCents: true,
           status: true,
           payable: {
-            select: {
-              id: true,
-              description: true,
-              supplier: { select: { id: true, name: true } },
-            },
+            select: { id: true, description: true, supplier: { select: { id: true, name: true } } },
           },
         },
       }),
 
       prisma.cost.findMany({
-        where: {
-          salonId,
-          occurredAt: { gte: from, lt: to },
-          ...nonStockCostsWhere(),
-        },
+        where: { salonId, occurredAt: { gte: from, lt: to }, ...nonStockCostsWhere() },
         orderBy: { occurredAt: "asc" },
         take: Math.floor(limit / 2),
         select: {
@@ -774,10 +749,7 @@ async function reportsUpcoming(req, res) {
         amountCents: r.amountCents,
         status: r.status,
         label: `A receber - ${r.receivable?.order?.client?.name || "-"}`,
-        meta: {
-          orderId: r.receivable?.order?.id || null,
-          installment: r.number,
-        },
+        meta: { orderId: r.receivable?.order?.id || null, installment: r.number },
       })),
       ...payItems.map((p) => ({
         kind: "PAYABLE",
@@ -786,10 +758,7 @@ async function reportsUpcoming(req, res) {
         amountCents: p.amountCents,
         status: p.status,
         label: `A pagar - ${p.payable?.description || "Conta a pagar"}`,
-        meta: {
-          supplierName: p.payable?.supplier?.name || null,
-          installment: p.number,
-        },
+        meta: { supplierName: p.payable?.supplier?.name || null, installment: p.number },
       })),
       ...costItems.map((c) => ({
         kind: "COST",
@@ -798,11 +767,7 @@ async function reportsUpcoming(req, res) {
         amountCents: c.amountCents,
         status: "PENDENTE",
         label: `Custo - ${c.name}`,
-        meta: {
-          type: c.type,
-          category: c.category || null,
-          supplierName: c.supplier?.name || null,
-        },
+        meta: { type: c.type, category: c.category || null, supplierName: c.supplier?.name || null },
       })),
     ]
       .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
@@ -821,10 +786,104 @@ async function reportsUpcoming(req, res) {
     });
   }
 
+  return res.json({ asOf: new Date(), start, windows });
+}
+
+// --------------------
+// PROJEÇÕES (novo)
+// GET /api/reports/projections?months=3&startMonth=YYYY-MM
+// --------------------
+async function sumReceivablesOpenByDue({ salonId, from, to }) {
+  const agg = await prisma.receivableInstallment.aggregate({
+    where: {
+      receivable: { salonId },
+      dueDate: { gte: from, lt: to },
+      status: { notIn: ["PAGO", "CANCELADO"] },
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function sumPayablesOpenByDue({ salonId, from, to }) {
+  const agg = await prisma.payableInstallment.aggregate({
+    where: {
+      payable: { salonId },
+      dueDate: { gte: from, lt: to },
+      status: { notIn: ["PAGO", "CANCELADO"] },
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function sumFixedCostsInRange({ salonId, from, to }) {
+  const agg = await prisma.cost.aggregate({
+    where: {
+      salonId,
+      type: "FIXO",
+      occurredAt: { gte: from, lt: to },
+      ...nonStockCostsWhere(),
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function reportsProjections(req, res) {
+  const { salonId } = req.user;
+
+  const months = clamp(req.query.months || 3, 1, 12);
+  let startMonth = req.query.startMonth ? String(req.query.startMonth).trim() : null;
+  if (startMonth && !/^\d{4}-\d{2}$/.test(startMonth)) {
+    return res.status(400).json({ message: "startMonth inválido. Use YYYY-MM" });
+  }
+  if (!startMonth) startMonth = getCurrentYmSP();
+
+  const startIdx = ymToIndex(startMonth);
+  const monthsList = [];
+  for (let i = 0; i < months; i++) monthsList.push(indexToYm(startIdx + i));
+
+  // garante recorrentes para todos os meses projetados
+  await ensureRecurringForMonths(salonId, monthsList);
+
+  const items = [];
+  for (const ym of monthsList) {
+    const r = monthRangeUTC(ym);
+    if (!r) continue;
+
+    const receivablesOpenCents = await sumReceivablesOpenByDue({ salonId, from: r.from, to: r.to });
+    const payablesOpenCents = await sumPayablesOpenByDue({ salonId, from: r.from, to: r.to });
+    const fixedCostsCents = await sumFixedCostsInRange({ salonId, from: r.from, to: r.to });
+
+    const expectedInCents = receivablesOpenCents;
+    const expectedOutCents = payablesOpenCents + fixedCostsCents;
+
+    items.push({
+      month: ym,
+      expectedInCents,
+      expectedOutCents,
+      netCents: expectedInCents - expectedOutCents,
+      breakdown: {
+        receivablesOpenCents,
+        payablesOpenCents,
+        fixedCostsCents,
+      },
+    });
+  }
+
+  const first = items[0] || null;
+  const breakevenGapCents = first
+    ? Math.max(0, (first.breakdown?.fixedCostsCents || 0) - (first.breakdown?.receivablesOpenCents || 0))
+    : 0;
+
   return res.json({
-    asOf: new Date(),
-    start,
-    windows,
+    startMonth,
+    months: items.length,
+    items,
+    kpis: {
+      breakevenGapCents,
+    },
   });
 }
 
@@ -833,4 +892,5 @@ module.exports = {
   reportsUpcoming,
   reportsDre,
   reportsDreSeries,
+  reportsProjections,
 };
