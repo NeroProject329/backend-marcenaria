@@ -11,6 +11,10 @@ function toUpper(v) {
   return String(v || "").trim().toUpperCase();
 }
 
+function digitsOnly(s) {
+  return String(s || "").replace(/\D/g, "");
+}
+
 function getPriceCents(plan) {
   if (plan === "PRO") {
     const v = Number(process.env.SAAS_PRICE_PRO_CENTS);
@@ -38,13 +42,22 @@ function normalizeMethods(methodsRaw) {
   return unique;
 }
 
-function generateExternalId(prefix = "saas") {
+function generateExternalId(prefix = "sb") {
   const rand = crypto.randomBytes(10).toString("hex");
   return `${prefix}_${Date.now()}_${rand}`;
 }
 
 // POST /api/billing/checkout
 async function checkout(req, res) {
+  // ✅ Guard pra não ficar erro “Cannot read properties...”
+  if (!prisma?.saasBilling?.create) {
+    return res.status(500).json({
+      message:
+        "Prisma Client no servidor não está atualizado (prisma.saasBilling undefined). " +
+        "Rode 'npx prisma generate' no build do Railway e redeploy com cache limpo.",
+    });
+  }
+
   const salonId = req.user?.salonId;
   const userId = req.user?.userId;
 
@@ -77,7 +90,7 @@ async function checkout(req, res) {
     });
   }
 
-  // Carrega salão + owner para preencher customer (se não vier no body)
+  // Carrega salão + owner (pra preencher customer se não vier tudo no body)
   const salon = await prisma.salon.findUnique({
     where: { id: salonId },
     select: {
@@ -90,7 +103,6 @@ async function checkout(req, res) {
 
   if (!salon) return res.status(404).json({ message: "Salão não encontrado." });
 
-  // ✅ AbacatePay exige: name, cellphone, email, taxId (CPF/CNPJ)
   const bodyCustomer = req.body?.customer || {};
 
   const customer = {
@@ -100,6 +112,8 @@ async function checkout(req, res) {
     taxId: String(bodyCustomer.taxId || req.body?.taxId || "").trim(),
   };
 
+  // ✅ AbacatePay: se enviar customer, os 4 campos são obrigatórios
+  // (name, cellphone, email, taxId). :contentReference[oaicite:0]{index=0}
   const missing = [];
   if (!customer.name) missing.push("customer.name");
   if (!customer.email) missing.push("customer.email");
@@ -114,6 +128,12 @@ async function checkout(req, res) {
     });
   }
 
+  // ✅ Normaliza campos (evita erro por formatação)
+  customer.taxId = digitsOnly(customer.taxId);
+  // mantém só dígitos e deixa com DDD
+  const cellDigits = digitsOnly(customer.cellphone);
+  customer.cellphone = cellDigits.length >= 10 ? cellDigits : customer.cellphone;
+
   let amountCents;
   try {
     amountCents = getPriceCents(plan);
@@ -121,7 +141,6 @@ async function checkout(req, res) {
     return res.status(500).json({ message: e.message || "Config de preço inválida." });
   }
 
-  // Cria registro interno primeiro (histórico)
   const externalId = generateExternalId("sb");
   const metadata = {
     salonId,
@@ -165,7 +184,7 @@ async function checkout(req, res) {
       },
     });
 
-    // Cria cobrança na AbacatePay
+    // ✅ AbacatePay billing/create usa methods PIX/CARD e frequency ONE_TIME :contentReference[oaicite:1]{index=1}
     const abacate = await createBilling({
       frequency: "ONE_TIME",
       methods,
@@ -175,11 +194,10 @@ async function checkout(req, res) {
       customer,
       allowCoupons: false,
       coupons: [],
-      externalId, // opcional, mas ajuda a rastrear
-      metadata,   // opcional, mas ajuda webhook/map
+      externalId,
+      metadata,
     });
 
-    // Atualiza registro com ids/urls do provedor
     const updated = await prisma.saasBilling.update({
       where: { id: billingRow.id },
       data: {
@@ -204,7 +222,6 @@ async function checkout(req, res) {
       billing: updated,
     });
   } catch (e) {
-    // se falhou depois de criar a linha interna, limpamos para não poluir histórico
     if (billingRow?.id) {
       try {
         await prisma.saasBilling.delete({ where: { id: billingRow.id } });
