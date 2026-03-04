@@ -9,6 +9,7 @@ const appointmentsRoutes = require("./routes/appointments.routes");
 const financeRoutes = require("./routes/finance.routes");
 const settingsRoutes = require("./routes/settings.routes");
 const adminRoutes = require("./routes/admin.routes");
+const adminAuthRoutes = require("./routes/adminAuth.routes"); // ✅ NOVO
 const meRoutes = require("./routes/me.routes");
 const ordersRoutes = require("./routes/orders.routes");
 const receivablesRoutes = require("./routes/receivables.routes");
@@ -122,6 +123,7 @@ app.use("/api/clients", clientsRoutes);
 app.use("/api/appointments", appointmentsRoutes);
 app.use("/api/finance", financeRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/admin/auth", adminAuthRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/orders", ordersRoutes);

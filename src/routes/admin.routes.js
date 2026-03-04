@@ -1,53 +1,23 @@
+// src/routes/admin.routes.js
 const router = require("express").Router();
 const { prisma } = require("../lib/prisma");
-const { requireAuth } = require("../middlewares/auth.middleware");
-const { requireAdminSecret } = require("../middlewares/admin.middleware");
+const { requireAdminAuth } = require("../middlewares/adminAuth.middleware");
 
 /**
- * POST /api/admin/dev/upgrade-pro
- * Headers: x-admin-secret: <ADMIN_SECRET>
- * Body opcional:
- *  - { salonId: "..." }   -> promove um salão específico
- *  - se não enviar, promove o salão do usuário logado
+ * Rotas internas do painel Admin (SaaS)
+ * Tudo aqui exige admin autenticado.
  */
-router.post("/dev/upgrade-pro", requireAuth, requireAdminSecret, async (req, res) => {
-  const targetSalonId = req.body?.salonId || req.user?.salonId;
-
-  if (!targetSalonId) {
-    return res.status(400).json({ message: "salonId não encontrado." });
-  }
-
-  const salon = await prisma.salon.findUnique({
-    where: { id: targetSalonId },
-    select: { id: true, plan: true, planStatus: true },
-  });
-
-  if (!salon) {
-    return res.status(404).json({ message: "Salão não encontrado." });
-  }
-
-  await prisma.salon.update({
-    where: { id: targetSalonId },
-    data: {
-      plan: "PRO",
-      planStatus: "ACTIVE",
-      planEndsAt: null,
-      trialEndsAt: null,
-    },
-  });
-
-  return res.json({ ok: true, salonId: targetSalonId, plan: "PRO" });
-});
+router.use(requireAdminAuth);
 
 /**
- * POST /api/admin/dev/set-plan
- * Headers: x-admin-secret: <ADMIN_SECRET>
- * Body: { salonId?, plan: "FREE"|"PRO"|"PREMIUM" }
+ * (mantido pra DEV) POST /api/admin/dev/set-plan
+ * Body: { salonId, plan: "FREE"|"PRO"|"PREMIUM" }
  */
-router.post("/dev/set-plan", requireAuth, requireAdminSecret, async (req, res) => {
-  const targetSalonId = req.body?.salonId || req.user?.salonId;
+router.post("/dev/set-plan", async (req, res) => {
+  const targetSalonId = req.body?.salonId;
   const plan = String(req.body?.plan || "").toUpperCase();
 
+  if (!targetSalonId) return res.status(400).json({ message: "Informe salonId." });
   if (!["FREE", "PRO", "PREMIUM"].includes(plan)) {
     return res.status(400).json({ message: "Plan inválido (FREE/PRO/PREMIUM)." });
   }
@@ -55,6 +25,18 @@ router.post("/dev/set-plan", requireAuth, requireAdminSecret, async (req, res) =
   await prisma.salon.update({
     where: { id: targetSalonId },
     data: { plan, planStatus: "ACTIVE" },
+  });
+
+  // audita
+  await prisma.adminActionLog.create({
+    data: {
+      adminUserId: req.admin.id,
+      action: "ADMIN_DEV_SET_PLAN",
+      targetSalonId: targetSalonId,
+      detailsJson: JSON.stringify({ plan }),
+      ip: String(req.headers["x-forwarded-for"] || req.ip || ""),
+      userAgent: String(req.headers["user-agent"] || ""),
+    },
   });
 
   return res.json({ ok: true, salonId: targetSalonId, plan });
