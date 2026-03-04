@@ -134,6 +134,7 @@ model Salon {
   budgets           Budget[]
   materials         Material[]
   materialMovements MaterialMovement[]
+  employees         Employee[]
 
   @@index([plan, planStatus])
 }
@@ -700,4 +701,37 @@ model MaterialSupplierPrice {
   @@unique([materialId, supplierId])
   @@index([supplierId])
   @@index([materialId])
+}
+
+model Employee {
+  id String @id @default(cuid())
+
+  salonId String
+  salon   Salon  @relation(fields: [salonId], references: [id])
+
+  name   String
+  role   String? // função/cargo
+  sector String? // setor
+
+  // valores em centavos
+  salaryCents   Int @default(0)
+  benefitsCents Int @default(0)
+
+  // dia do pagamento no mês (1..31)
+  payDay Int @default(5)
+
+  // ativo = entra como custo fixo recorrente
+  isActive Boolean @default(true)
+
+  // id do grupo recorrente que representa a “folha” desse funcionário na tabela Cost
+  payrollRecurringGroupId String
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([salonId, payrollRecurringGroupId])
+  @@index([salonId, isActive])
+  @@index([salonId, name])
 }

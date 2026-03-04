@@ -80,17 +80,21 @@ function monthStartUTC(monthStr) {
 
 /**
  * ✅ Garante que TODOS custos recorrentes tenham um registro no month (YYYY-MM).
- * ✅ AGORA mantém o mesmo DIA do occurredAt (ex: aluguel dia 15 continua dia 15).
+ * ✅ Mantém o mesmo DIA do occurredAt (ex: aluguel dia 15 continua dia 15).
+ *
+ * 🔥 IMPORTANTE (para Funcionários):
+ * - Agora a lógica considera o ÚLTIMO registro do grupo (mesmo se isRecurring=false).
+ * - Se o último registro do grupo estiver com isRecurring=false, ele PARA de gerar nos meses seguintes.
  */
 async function ensureRecurringMonth(salonId, month) {
   if (!monthRange(month)) return;
 
   await prisma.$transaction(async (tx) => {
-    // 1) Pega o histórico recorrente até o mês alvo
-    const recurringHistory = await tx.cost.findMany({
+    // 1) Pega o histórico do grupo até o mês alvo (SEM filtrar isRecurring)
+    //    -> assim conseguimos “encerrar” um grupo com um registro isRecurring=false no mês atual.
+    const history = await tx.cost.findMany({
       where: {
         salonId,
-        isRecurring: true,
         recurringGroupId: { not: null },
         yearMonth: { lte: month },
       },
@@ -105,22 +109,28 @@ async function ensureRecurringMonth(salonId, month) {
         category: true,
         amountCents: true,
         supplierId: true,
-        occurredAt: true, // ✅ precisamos disso pra manter o dia
+        occurredAt: true,
+        isRecurring: true, // ✅ agora precisamos disso
       },
     });
 
-    // 2) Último conhecido por grupo
+    // 2) Último conhecido por grupo (mais recente)
     const lastByGroup = new Map();
-    for (const c of recurringHistory) {
+    for (const c of history) {
       const g = c.recurringGroupId;
       if (!g) continue;
       if (!lastByGroup.has(g)) lastByGroup.set(g, c);
     }
 
-    const groups = Array.from(lastByGroup.keys());
+    // 3) Considera só os grupos que ainda estão recorrentes (último registro isRecurring=true)
+    const groups = [];
+    for (const [g, base] of lastByGroup.entries()) {
+      if (!base) continue;
+      if (base.isRecurring) groups.push(g);
+    }
     if (!groups.length) return;
 
-    // 3) Já existe no mês?
+    // 4) Já existe no mês?
     const existingThisMonth = await tx.cost.findMany({
       where: {
         salonId,
@@ -131,7 +141,7 @@ async function ensureRecurringMonth(salonId, month) {
     });
     const hasSet = new Set(existingThisMonth.map((x) => x.recurringGroupId));
 
-    // 4) Cria os que faltam mantendo o DIA do occurredAt do "base"
+    // 5) Cria os que faltam mantendo o DIA do occurredAt do "base"
     const toCreate = [];
     for (const g of groups) {
       if (hasSet.has(g)) continue;
@@ -339,10 +349,10 @@ async function updateCost(req, res) {
     isRecurring,
   } = req.body;
 
- const exists = await prisma.cost.findFirst({
-  where: { id, salonId },
-  select: { id: true, recurringGroupId: true, isRecurring: true, yearMonth: true },
-});
+  const exists = await prisma.cost.findFirst({
+    where: { id, salonId },
+    select: { id: true, recurringGroupId: true, isRecurring: true, yearMonth: true },
+  });
   if (!exists) return res.status(404).json({ message: "Custo não encontrado." });
 
   const data = {};
@@ -383,22 +393,18 @@ async function updateCost(req, res) {
     data.category = category ? String(category).trim() : null;
   }
 
-if (isRecurring !== undefined) {
-  const nextRecurring = !!isRecurring;
-  data.isRecurring = nextRecurring;
+  if (isRecurring !== undefined) {
+    const nextRecurring = !!isRecurring;
+    data.isRecurring = nextRecurring;
 
-  // ✅ se marcou como recorrente e ainda não tem grupo, cria um
-  if (nextRecurring && !exists.recurringGroupId) {
-    data.recurringGroupId = `rec_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    // ✅ se marcou como recorrente e ainda não tem grupo, cria um
+    if (nextRecurring && !exists.recurringGroupId) {
+      data.recurringGroupId = `rec_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    }
+    // ✅ se desmarcou recorrente, NÃO apaga o recurringGroupId.
+    // Assim, o último registro do grupo fica isRecurring=false e a geração PARA nos meses seguintes.
+    // (Se quiser “desvincular” do grupo, aí sim você poderia setar data.recurringGroupId = null.)
   }
-
-  // ✅ se desmarcou recorrente, solta do grupo (opcional)
-  // se preferir manter o histórico do grupo, comente essas 2 linhas:
-  if (!nextRecurring) {
-    data.recurringGroupId = null;
-  }
-}
-
 
   if (supplierId !== undefined) {
     if (!supplierId) {
@@ -451,7 +457,6 @@ async function deleteCost(req, res) {
   return res.json({ ok: true });
 }
 
-// GET /api/costs/summary?month=YYYY-MM&workDays=22
 // GET /api/costs/summary?month=YYYY-MM&workDays=22
 async function costSummary(req, res) {
   const { salonId } = req.user;
