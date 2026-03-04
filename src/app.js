@@ -21,6 +21,10 @@ const materialsRoutes = require("./routes/materials.routes");
 // ✅ NOVO: Funcionários
 const employeesRoutes = require("./routes/employees.routes");
 
+// ✅ NOVO
+const reportsRoutes = require("./routes/reports.routes");
+
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -45,5 +49,9 @@ app.use("/api/materials", materialsRoutes);
 
 // ✅ NOVO: endpoint do módulo Funcionários
 app.use("/api/employees", employeesRoutes);
+
+
+// ✅ NOVO
+app.use("/api/reports", reportsRoutes);
 
 module.exports = { app };

@@ -375,7 +375,7 @@ async function calcCashflow({ salonId, from, to, basis = "paid" }) {
   };
 }
 
-// ✅ NOVO: GET /api/finance/cashflow?from=ISO&to=ISO
+// ✅ NOVO: GET /api/finance/cashflow?from=ISO&to=ISO&basis=paid|due
 async function financeCashflow(req, res) {
   const { salonId } = req.user;
 
@@ -385,12 +385,17 @@ async function financeCashflow(req, res) {
   if (!from || !to) return res.status(400).json({ message: "Informe from e to em ISO." });
   if (from >= to) return res.status(400).json({ message: "Intervalo inválido: from precisa ser menor que to." });
 
+  // ✅ agora respeita o basis que o front já manda
+  const basis = String(req.query.basis || "paid").toLowerCase();
+  if (!["paid", "due"].includes(basis)) {
+    return res.status(400).json({ message: "basis inválido. Use paid ou due" });
+  }
+
   // saldo anterior = fluxo do “início dos tempos” até 'from'
-  // (boa prática: usa 1970)
   const epoch = new Date(0);
 
-  const prev = await calcCashflow({ salonId, from: epoch, to: from });
-  const cur = await calcCashflow({ salonId, from, to });
+  const prev = await calcCashflow({ salonId, from: epoch, to: from, basis });
+  const cur = await calcCashflow({ salonId, from, to, basis });
 
   const previousBalanceCents = prev.balanceCents;
   const currentBalanceCents = previousBalanceCents + cur.balanceCents;
