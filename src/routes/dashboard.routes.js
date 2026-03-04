@@ -1,11 +1,11 @@
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth.middleware");
-const { overview, upcomingPayments } = require("../controllers/dashboard.controller");
+const { overview, upcomingPayments, plus } = require("../controllers/dashboard.controller");
 
-router.use(requireAuth);
-router.get("/overview", overview);
+router.get("/overview", requireAuth, overview);
+router.get("/upcoming-payments", requireAuth, upcomingPayments);
 
-// ✅ novo widget
-router.get("/upcoming-payments", upcomingPayments);
+// ✅ NOVO
+router.get("/plus", requireAuth, plus);
 
 module.exports = router;

@@ -38,6 +38,10 @@ function clampInt(v, def, min, max) {
   if (Number.isNaN(n)) return def;
   return Math.max(min, Math.min(max, n));
 }
+function pct(n, d) {
+  if (!d || d <= 0) return 0;
+  return Math.round((n / d) * 10000) / 100;
+}
 
 // --- helpers de mês (pra garantir recorrência) ---
 function monthRange(monthStr) {
@@ -67,6 +71,14 @@ function incMonth(ym) {
   const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
   return `${yy}-${mm}`;
 }
+function decMonth(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, 1));
+  dt.setUTCMonth(dt.getUTCMonth() - 1);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  return `${yy}-${mm}`;
+}
 function monthsBetweenSP(a, b) {
   const start = monthKeyFromDateSP(a);
   const end = monthKeyFromDateSP(b);
@@ -75,7 +87,7 @@ function monthsBetweenSP(a, b) {
   while (cur !== end) {
     cur = incMonth(cur);
     out.push(cur);
-    if (out.length > 12) break; // segurança
+    if (out.length > 24) break; // segurança
   }
   return out;
 }
@@ -97,6 +109,20 @@ function buildDateForMonthSP(monthStr, dayOfMonth) {
   const d = Math.max(1, Math.min(lastDay, Number(dayOfMonth) || 1));
   const dd = String(d).padStart(2, "0");
   return new Date(`${monthStr}-${dd}T00:00:00-03:00`);
+}
+
+// ✅ excluir custos de estoque (igual reports/finance)
+function nonStockCostsWhere() {
+  return {
+    NOT: {
+      OR: [
+        { category: { equals: "Estoque", mode: "insensitive" } },
+        { recurringGroupId: { startsWith: "ESTOQUE:", mode: "insensitive" } },
+        { name: { startsWith: "Compra de material", mode: "insensitive" } },
+        { name: { startsWith: "Compra de estoque", mode: "insensitive" } },
+      ],
+    },
+  };
 }
 
 async function ensureRecurringMonth(salonId, month) {
@@ -173,6 +199,9 @@ async function ensureRecurringMonth(salonId, month) {
   });
 }
 
+// ---------------------------
+// OVERVIEW (já existente) — NÃO MEXER NA ASSINATURA
+// ---------------------------
 async function overview(req, res) {
   const { salonId } = req.user;
 
@@ -233,6 +262,7 @@ async function overview(req, res) {
       status: true,
       expectedDeliveryAt: true,
       totalCents: true,
+      createdAt: true,
       client: { select: { id: true, name: true, phone: true } },
     },
   });
@@ -291,7 +321,7 @@ async function overview(req, res) {
   });
 }
 
-// ✅ NOVO: GET /api/dashboard/upcoming-payments?days=7&take=10
+// ✅ já existe: próximos pagamentos (só pagar)
 async function upcomingPayments(req, res) {
   const { salonId } = req.user;
 
@@ -301,17 +331,14 @@ async function upcomingPayments(req, res) {
   const now = new Date();
   const today = startOfDay(now);
 
-  // janela: mostra próximos + atrasados recentes (até "days-1" pra trás)
   const windowStart = startOfDay(addDays(today, -(days - 1)));
   const windowEnd = endOfDay(addDays(today, days - 1));
 
-  // garante recorrentes nos meses cobertos
   const months = monthsBetweenSP(windowStart, windowEnd);
   for (const m of months) {
     await ensureRecurringMonth(salonId, m);
   }
 
-  // 1) parcelas de contas a pagar
   const inst = await prisma.payableInstallment.findMany({
     where: {
       payable: { salonId },
@@ -334,7 +361,6 @@ async function upcomingPayments(req, res) {
     },
   });
 
-  // 2) custos FIXOS (vencimento = occurredAt)
   const costs = await prisma.cost.findMany({
     where: {
       salonId,
@@ -386,4 +412,298 @@ async function upcomingPayments(req, res) {
   });
 }
 
-module.exports = { overview, upcomingPayments };
+// ---------------------------
+// ✅ NOVO: DASHBOARD PLUS
+// GET /api/dashboard/plus?months=6&endMonth=YYYY-MM&basis=due|paid&upcomingDays=30&upcomingTake=15
+// ---------------------------
+async function sumReceivablesForRange({ salonId, from, to, basis }) {
+  if (basis === "paid") {
+    const agg = await prisma.receivableInstallment.aggregate({
+      where: {
+        receivable: { salonId },
+        status: "PAGO",
+        paidAt: { gte: from, lt: to },
+      },
+      _sum: { amountCents: true },
+    });
+    return agg._sum.amountCents || 0;
+  }
+
+  const agg = await prisma.receivableInstallment.aggregate({
+    where: {
+      receivable: { salonId },
+      dueDate: { gte: from, lt: to },
+      status: { not: "CANCELADO" },
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function sumCostsByTypeForRange({ salonId, from, to, type }) {
+  const agg = await prisma.cost.aggregate({
+    where: {
+      salonId,
+      type,
+      occurredAt: { gte: from, lt: to },
+      ...nonStockCostsWhere(),
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function sumMaterialsPurchasesForRange({ salonId, from, to }) {
+  const moves = await prisma.materialMovement.findMany({
+    where: { salonId, type: "IN", occurredAt: { gte: from, lt: to } },
+    select: { qty: true, unitCostCents: true },
+  });
+
+  let total = 0;
+  for (const mv of moves) {
+    const qty = Number(mv.qty || 0);
+    const unit = Number(mv.unitCostCents || 0);
+    total += Math.round(qty * unit);
+  }
+  return total;
+}
+
+async function calcDreMonth({ salonId, month, basis }) {
+  const r = monthRange(month);
+  if (!r) return null;
+
+  await ensureRecurringMonth(salonId, month);
+
+  const revenueCents = await sumReceivablesForRange({ salonId, from: r.from, to: r.to, basis });
+  const materialsCents = await sumMaterialsPurchasesForRange({ salonId, from: r.from, to: r.to });
+  const variableCostsCents = await sumCostsByTypeForRange({ salonId, from: r.from, to: r.to, type: "VARIAVEL" });
+  const fixedCostsCents = await sumCostsByTypeForRange({ salonId, from: r.from, to: r.to, type: "FIXO" });
+
+  const cmvCents = materialsCents + variableCostsCents;
+  const grossProfitCents = revenueCents - cmvCents;
+  const operatingProfitCents = grossProfitCents - fixedCostsCents;
+
+  return {
+    month,
+    revenueCents,
+    materialsCents,
+    variableCostsCents,
+    fixedCostsCents,
+    profitCents: operatingProfitCents,
+    marginPct: pct(operatingProfitCents, revenueCents),
+  };
+}
+
+async function plus(req, res) {
+  const { salonId } = req.user;
+
+  const months = clampInt(req.query.months, 6, 3, 24);
+  const upcomingDays = clampInt(req.query.upcomingDays, 30, 7, 90);
+  const upcomingTake = clampInt(req.query.upcomingTake, 15, 5, 50);
+
+  const basis = String(req.query.basis || "due").toLowerCase();
+  if (!["due", "paid"].includes(basis)) {
+    return res.status(400).json({ message: "basis inválido. Use due ou paid" });
+  }
+
+  let endMonth = req.query.endMonth ? String(req.query.endMonth).trim() : monthKeyFromDateSP(new Date());
+  if (!/^\d{4}-\d{2}$/.test(endMonth)) {
+    return res.status(400).json({ message: "endMonth inválido. Use YYYY-MM" });
+  }
+
+  // série mensal (lucro x faturamento)
+  const labels = [];
+  const revenueSeries = [];
+  const profitSeries = [];
+  const marginSeries = [];
+
+  let cur = endMonth;
+  const monthsList = [];
+  for (let i = 0; i < months; i++) {
+    monthsList.push(cur);
+    cur = decMonth(cur);
+  }
+  monthsList.reverse();
+
+  for (const m of monthsList) {
+    const d = await calcDreMonth({ salonId, month: m, basis });
+    labels.push(m);
+    revenueSeries.push(d?.revenueCents || 0);
+    profitSeries.push(d?.profitCents || 0);
+    marginSeries.push(d?.marginPct || 0);
+  }
+
+  // cards do mês atual (endMonth)
+  const dre = await calcDreMonth({ salonId, month: endMonth, basis });
+  const cards = {
+    month: endMonth,
+    revenueCents: dre?.revenueCents || 0,
+    profitCents: dre?.profitCents || 0,
+    marginPct: dre?.marginPct || 0,
+    fixedCostsCents: dre?.fixedCostsCents || 0,
+    variableCostsCents: dre?.variableCostsCents || 0,
+    materialsCents: dre?.materialsCents || 0,
+  };
+
+  // próximos vencimentos (a receber + a pagar + custos) nos próximos X dias
+  const now = new Date();
+  const start = startOfDay(now);
+  const end = endOfDay(addDays(start, upcomingDays));
+
+  // garante recorrentes nos meses cobertos
+  const monthsWin = monthsBetweenSP(start, end);
+  for (const m of monthsWin) await ensureRecurringMonth(salonId, m);
+
+  const [recvAgg, payAgg, costsAgg] = await Promise.all([
+    prisma.receivableInstallment.aggregate({
+      where: {
+        receivable: { salonId },
+        dueDate: { gte: start, lte: end },
+        status: { notIn: ["PAGO", "CANCELADO"] },
+      },
+      _sum: { amountCents: true },
+    }),
+    prisma.payableInstallment.aggregate({
+      where: {
+        payable: { salonId },
+        dueDate: { gte: start, lte: end },
+        status: { notIn: ["PAGO", "CANCELADO"] },
+      },
+      _sum: { amountCents: true },
+    }),
+    prisma.cost.aggregate({
+      where: {
+        salonId,
+        occurredAt: { gte: start, lte: end },
+        ...nonStockCostsWhere(),
+      },
+      _sum: { amountCents: true },
+    }),
+  ]);
+
+  const receivableOpenCents = recvAgg._sum.amountCents || 0;
+  const payableOpenCents = payAgg._sum.amountCents || 0;
+  const costsCents = costsAgg._sum.amountCents || 0;
+
+  const [recvItems, payItems, costItems] = await Promise.all([
+    prisma.receivableInstallment.findMany({
+      where: {
+        receivable: { salonId },
+        dueDate: { gte: start, lte: end },
+        status: { notIn: ["PAGO", "CANCELADO"] },
+      },
+      orderBy: [{ dueDate: "asc" }, { number: "asc" }],
+      take: upcomingTake,
+      select: {
+        id: true,
+        dueDate: true,
+        amountCents: true,
+        status: true,
+        number: true,
+        receivable: {
+          select: {
+            order: { select: { id: true, client: { select: { id: true, name: true } } } },
+          },
+        },
+      },
+    }),
+    prisma.payableInstallment.findMany({
+      where: {
+        payable: { salonId },
+        dueDate: { gte: start, lte: end },
+        status: { notIn: ["PAGO", "CANCELADO"] },
+      },
+      orderBy: [{ dueDate: "asc" }, { number: "asc" }],
+      take: upcomingTake,
+      select: {
+        id: true,
+        dueDate: true,
+        amountCents: true,
+        status: true,
+        number: true,
+        payable: {
+          select: {
+            description: true,
+            supplier: { select: { name: true } },
+          },
+        },
+      },
+    }),
+    prisma.cost.findMany({
+      where: {
+        salonId,
+        occurredAt: { gte: start, lte: end },
+        ...nonStockCostsWhere(),
+      },
+      orderBy: { occurredAt: "asc" },
+      take: upcomingTake,
+      select: {
+        id: true,
+        occurredAt: true,
+        amountCents: true,
+        name: true,
+        type: true,
+        supplier: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const upcomingItems = [
+    ...recvItems.map((r) => ({
+      kind: "RECEIVABLE",
+      dueDate: r.dueDate,
+      amountCents: r.amountCents,
+      status: r.status,
+      title: r.receivable?.order?.client?.name || "-",
+      subtitle: `A receber (parcela ${r.number || 1})`,
+    })),
+    ...payItems.map((p) => ({
+      kind: "PAYABLE",
+      dueDate: p.dueDate,
+      amountCents: p.amountCents,
+      status: p.status,
+      title: p.payable?.supplier?.name || "—",
+      subtitle: p.payable?.description || "Conta a pagar",
+    })),
+    ...costItems.map((c) => ({
+      kind: "COST",
+      dueDate: c.occurredAt,
+      amountCents: c.amountCents,
+      status: new Date(c.occurredAt) < start ? "ATRASADO" : "PENDENTE",
+      title: c.supplier?.name || "—",
+      subtitle: `Custo ${String(c.type || "").toLowerCase()} - ${c.name}`,
+    })),
+  ]
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
+    .slice(0, upcomingTake);
+
+  return res.json({
+    meta: {
+      endMonth,
+      basis,
+      months,
+      asOf: new Date().toISOString(),
+      upcomingDays,
+      upcomingTake,
+    },
+    cards,
+    series: {
+      labels,
+      revenueCents: revenueSeries,
+      profitCents: profitSeries,
+      marginPct: marginSeries,
+    },
+    upcoming: {
+      from: start.toISOString(),
+      to: end.toISOString(),
+      receivableOpenCents,
+      payableOpenCents,
+      costsCents,
+      toReceiveCents: receivableOpenCents,
+      toPayCents: payableOpenCents + costsCents,
+      items: upcomingItems,
+    },
+  });
+}
+
+module.exports = { overview, upcomingPayments, plus };
