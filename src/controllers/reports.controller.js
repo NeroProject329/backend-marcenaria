@@ -9,7 +9,7 @@ function parseISO(v) {
 }
 
 function parseDateOnlySP(v) {
-  // aceita YYYY-MM-DD e cria 00:00 no fuso -03 (compatível com seu front de <input type="date">)
+  // aceita YYYY-MM-DD e cria 00:00 no fuso -03 (compatível com <input type="date">)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ""))) return null;
   return new Date(`${v}T00:00:00-03:00`);
 }
@@ -45,7 +45,7 @@ function periodFromQuery(q) {
     return { ok: true, mode: "range", dateFrom: String(q.dateFrom), dateTo: String(q.dateTo), from: df, to };
   }
 
-  // 3) compat: from/to ISO (igual finance)
+  // 3) compat: from/to ISO
   if (q.from || q.to) {
     const from = q.from ? parseISO(q.from) : null;
     const to = q.to ? parseISO(q.to) : null;
@@ -84,7 +84,7 @@ function indexToYm(idx) {
 }
 
 function monthsCoveredSP(from, toExclusive) {
-  const end = new Date(toExclusive.getTime() - 1); // último instante dentro do range
+  const end = new Date(toExclusive.getTime() - 1);
   const startYm = monthKeyFromDateSP(from);
   const endYm = monthKeyFromDateSP(end);
 
@@ -96,8 +96,24 @@ function monthsCoveredSP(from, toExclusive) {
   return out;
 }
 
+function getCurrentYmSP() {
+  const now = new Date();
+  return monthKeyFromDateSP(now);
+}
+
+function parseBasis(q) {
+  const basis = String(q.basis || "due").toLowerCase();
+  if (!["paid", "due"].includes(basis)) return { ok: false, message: "basis inválido. Use paid ou due" };
+  return { ok: true, basis };
+}
+
+function pct(n, d) {
+  if (!d || d <= 0) return 0;
+  return Math.round((n / d) * 10000) / 100; // 2 casas
+}
+
 // --------------------
-// Filtro: excluir custos de estoque (igual finance.controller)
+// Excluir custos de estoque
 // --------------------
 function nonStockCostsWhere() {
   return {
@@ -113,8 +129,7 @@ function nonStockCostsWhere() {
 }
 
 // --------------------
-// Recorrência de custos (copiado da lógica do costs.controller)
-// -> garante custos recorrentes no(s) mês(es) consultados
+// Recorrência de custos (garante custos recorrentes no(s) mês(es))
 // --------------------
 function monthRange(monthStr) {
   const [y, m] = String(monthStr || "").split("-").map(Number);
@@ -230,7 +245,7 @@ async function ensureRecurringForRange(salonId, from, toExclusive) {
 }
 
 // --------------------
-// Cálculos base de caixa (Real vs Projetado)
+// Cálculos base (Real/Projetado)
 // --------------------
 async function sumLegacyAutoInAppointments({ salonId, from, to }) {
   const appts = await prisma.appointment.findMany({
@@ -372,7 +387,7 @@ async function calcCashSeries({ salonId, from, to, basis }) {
     }),
   ]);
 
-  const map = new Map(); // day -> { day, inCents, outCents, netCents }
+  const map = new Map();
 
   function addIn(day, cents) {
     const cur = map.get(day) || { day, inCents: 0, outCents: 0, netCents: 0 };
@@ -391,7 +406,7 @@ async function calcCashSeries({ salonId, from, to, basis }) {
 
   for (const t of manual) {
     const day = dayKeyUTC(t.occurredAt);
-    if (t.type === "INCOME") addIn(day, t.amount || 0);
+    if (String(t.type).toUpperCase() === "INCOME") addIn(day, t.amount || 0);
     else addOut(day, t.amount || 0);
   }
 
@@ -413,6 +428,141 @@ async function calcCashSeries({ salonId, from, to, basis }) {
 }
 
 // --------------------
+// DRE (novo)
+// --------------------
+async function sumMaterialsPurchases({ salonId, from, to }) {
+  // Aproximação “concorrente”: compras/entradas de material no período
+  const moves = await prisma.materialMovement.findMany({
+    where: {
+      salonId,
+      type: "IN",
+      occurredAt: { gte: from, lt: to },
+    },
+    select: { qty: true, unitCostCents: true },
+  });
+
+  let total = 0;
+  for (const mv of moves) {
+    const qty = Number(mv.qty || 0);
+    const unit = Number(mv.unitCostCents || 0);
+    total += Math.round(qty * unit);
+  }
+  return total;
+}
+
+async function sumCostsByType({ salonId, from, to, type }) {
+  const agg = await prisma.cost.aggregate({
+    where: {
+      salonId,
+      type,
+      occurredAt: { gte: from, lt: to },
+      ...nonStockCostsWhere(),
+    },
+    _sum: { amountCents: true },
+  });
+  return agg._sum.amountCents || 0;
+}
+
+async function calcDre({ salonId, from, to, basis }) {
+  await ensureRecurringForRange(salonId, from, to);
+
+  const revenueCents = await sumReceivables({ salonId, from, to, basis });
+
+  const materialsCents = await sumMaterialsPurchases({ salonId, from, to });
+  const variableCostsCents = await sumCostsByType({ salonId, from, to, type: "VARIAVEL" });
+  const fixedCostsCents = await sumCostsByType({ salonId, from, to, type: "FIXO" });
+
+  const cmvCents = materialsCents + variableCostsCents;
+
+  const grossProfitCents = revenueCents - cmvCents;
+  const operatingProfitCents = grossProfitCents - fixedCostsCents;
+
+  return {
+    basis,
+    revenueCents,
+    materialsCents,
+    variableCostsCents,
+    fixedCostsCents,
+    cmvCents,
+    grossProfitCents,
+    operatingProfitCents,
+    grossMarginPct: pct(grossProfitCents, revenueCents),
+    operatingMarginPct: pct(operatingProfitCents, revenueCents),
+  };
+}
+
+// GET /api/reports/dre?month=YYYY-MM|dateFrom/dateTo|from/to&basis=due|paid
+async function reportsDre(req, res) {
+  const { salonId } = req.user;
+
+  const pr = periodFromQuery(req.query);
+  if (!pr.ok) return res.status(400).json({ message: pr.message });
+
+  const b = parseBasis(req.query);
+  if (!b.ok) return res.status(400).json({ message: b.message });
+
+  const { from, to } = pr;
+
+  const dre = await calcDre({ salonId, from, to, basis: b.basis });
+
+  return res.json({
+    range: {
+      mode: pr.mode,
+      month: pr.month || null,
+      dateFrom: pr.dateFrom || null,
+      dateTo: pr.dateTo || null,
+      from,
+      to,
+    },
+    dre,
+  });
+}
+
+// GET /api/reports/dre/series?months=6&endMonth=YYYY-MM&basis=due|paid
+async function reportsDreSeries(req, res) {
+  const { salonId } = req.user;
+
+  const b = parseBasis(req.query);
+  if (!b.ok) return res.status(400).json({ message: b.message });
+
+  const months = Math.min(Math.max(Number(req.query.months || 6), 1), 24);
+
+  let endMonth = req.query.endMonth ? String(req.query.endMonth).trim() : null;
+  if (endMonth && !/^\d{4}-\d{2}$/.test(endMonth)) {
+    return res.status(400).json({ message: "endMonth inválido. Use YYYY-MM" });
+  }
+  if (!endMonth) endMonth = getCurrentYmSP();
+
+  const endIdx = ymToIndex(endMonth);
+  const items = [];
+
+  for (let i = months - 1; i >= 0; i--) {
+    const ym = indexToYm(endIdx - i);
+    const r = monthRangeUTC(ym);
+    if (!r) continue;
+
+    const dre = await calcDre({ salonId, from: r.from, to: r.to, basis: b.basis });
+
+    items.push({
+      month: ym,
+      revenueCents: dre.revenueCents,
+      profitCents: dre.operatingProfitCents,
+      marginPct: dre.operatingMarginPct,
+      fixedCostsCents: dre.fixedCostsCents,
+      variableCostsCents: dre.variableCostsCents,
+      materialsCents: dre.materialsCents,
+    });
+  }
+
+  return res.json({
+    basis: b.basis,
+    endMonth,
+    months: items.length,
+    items,
+  });
+}
+
+// --------------------
 // 1) DFC (Real + Projetado)
 // GET /api/reports/dfc?month=YYYY-MM
 // GET /api/reports/dfc?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD
@@ -425,19 +575,15 @@ async function reportsDfc(req, res) {
 
   const { from, to } = pr;
 
-  // garante custos recorrentes nos meses do range
   await ensureRecurringForRange(salonId, from, to);
 
   const epoch = new Date(0);
 
-  // saldo inicial REAL (caixa): sempre baseado em paid
   const prevReal = await calcCashTotals({ salonId, from: epoch, to: from, basis: "paid" });
 
-  // período REAL (paidAt)
   const realTotals = await calcCashTotals({ salonId, from, to, basis: "paid" });
   const realSeries = await calcCashSeries({ salonId, from, to, basis: "paid" });
 
-  // período PROJETADO (dueDate) — mas começa do saldo real inicial
   const projTotals = await calcCashTotals({ salonId, from, to, basis: "due" });
   const projSeries = await calcCashSeries({ salonId, from, to, basis: "due" });
 
@@ -500,8 +646,6 @@ function parseDaysParam(v) {
 
   const uniq = Array.from(new Set(raw));
   uniq.sort((a, b) => a - b);
-
-  // evita coisas absurdas
   return uniq.filter((n) => n <= 365);
 }
 
@@ -515,7 +659,6 @@ async function reportsUpcoming(req, res) {
   const maxDays = daysList.length ? daysList[daysList.length - 1] : 30;
   const maxTo = new Date(start.getTime() + maxDays * 24 * 60 * 60 * 1000);
 
-  // garante recorrentes nos meses cobertos
   await ensureRecurringForRange(salonId, start, maxTo);
 
   const windows = [];
@@ -556,7 +699,6 @@ async function reportsUpcoming(req, res) {
     const payableOpenCents = payAgg._sum.amountCents || 0;
     const costsCents = costsAgg._sum.amountCents || 0;
 
-    // itens (limitados)
     const [recvItems, payItems, costItems] = await Promise.all([
       prisma.receivableInstallment.findMany({
         where: {
@@ -689,4 +831,6 @@ async function reportsUpcoming(req, res) {
 module.exports = {
   reportsDfc,
   reportsUpcoming,
+  reportsDre,
+  reportsDreSeries,
 };
