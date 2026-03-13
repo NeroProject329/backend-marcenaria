@@ -4,6 +4,7 @@ const https = require("https");
 const { prisma } = require("../lib/prisma");
 
 const HEADER_START_Y = 74;
+const IMAGE_TIMEOUT_MS = 1500;
 
 function moneyBRL(cents) {
   return (Number(cents || 0) / 100).toLocaleString("pt-BR", {
@@ -76,23 +77,68 @@ function clientNotes(raw) {
   return s.trim();
 }
 
-function fetchBuffer(url) {
+function fetchBuffer(url, timeoutMs = IMAGE_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    const lib = /^https:/i.test(url) ? https : http;
+    try {
+      const lib = /^https:/i.test(url) ? https : http;
 
-    lib
-      .get(url, (res) => {
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode}`));
+      const req = lib.get(
+        url,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 PDFKit",
+            Accept: "*/*",
+          },
+        },
+        (res) => {
+          if (
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            res.resume();
+            clearTimeout(timer);
+            return resolve(fetchBuffer(res.headers.location, timeoutMs));
+          }
+
+          if (res.statusCode !== 200) {
+            res.resume();
+            clearTimeout(timer);
+            return reject(new Error(`HTTP ${res.statusCode}`));
+          }
+
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            clearTimeout(timer);
+            resolve(Buffer.concat(chunks));
+          });
         }
+      );
 
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
-      })
-      .on("error", reject);
+      req.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+
+      const timer = setTimeout(() => {
+        req.destroy(new Error("Image fetch timeout"));
+      }, timeoutMs);
+    } catch (err) {
+      reject(err);
+    }
   });
+}
+
+async function tryDrawLogo(doc, url, x, y, opts = {}) {
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  try {
+    const buf = await fetchBuffer(url, IMAGE_TIMEOUT_MS);
+    doc.image(buf, x, y, opts);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function drawHeader(doc, budget) {
@@ -331,15 +377,10 @@ async function budgetPdf(req, res) {
   const client = budget.client || {};
   const notesUser = clientNotes(budget.notes);
 
-  if (salon.logoUrl && /^https?:\/\//i.test(salon.logoUrl)) {
-    try {
-      const buf = await fetchBuffer(salon.logoUrl);
-      doc.image(buf, pageW - margin - 46, 10, {
-        fit: [34, 34],
-        align: "right",
-      });
-    } catch {}
-  }
+  await tryDrawLogo(doc, salon.logoUrl, pageW - margin - 46, 10, {
+    fit: [34, 34],
+    align: "right",
+  });
 
   y = drawCardsRow(doc, y, [
     {
