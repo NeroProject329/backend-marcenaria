@@ -329,54 +329,77 @@ async function budgetPdf(req, res) {
   drawBar(doc, x0 + 8, budgetBarY, w0 - 16, 20, "ORÇAMENTO", BLUE);
 
   const tableY = budgetBarY + 30;
+const tableInnerX = x0 + 8;
+const tableInnerW = w0 - 16;
 
-  const cols = { n: 30, desc: 245, unit: 95, qty: 70, total: 75 };
+const cols = {
+  n: 30,
+  desc: 210,
+  unit: 100,
+  qty: 64,
+  total: tableInnerW - (30 + 210 + 100 + 64),
+};
 
-  const xN = x0 + 8;
-  const xDesc = xN + cols.n;
-  const xUnit = xDesc + cols.desc;
-  const xQty = xUnit + cols.unit;
-  const xTotal = xQty + cols.qty;
+const xN = tableInnerX;
+const xDesc = xN + cols.n;
+const xUnit = xDesc + cols.desc;
+const xQty = xUnit + cols.unit;
+const xTotal = xQty + cols.qty;
 
-  doc.roundedRect(x0 + 8, tableY, w0 - 16, 22, 6).fillAndStroke(SOFT, BORDER);
+doc.roundedRect(tableInnerX, tableY, tableInnerW, 22, 6).fillAndStroke(SOFT, BORDER);
 
-  doc.fillColor(MUTED).font("Helvetica-Bold").fontSize(9);
-  doc.text("N°", xN + 6, tableY + 7, { width: cols.n - 8, align: "left" });
-  doc.text("Descrição", xDesc + 6, tableY + 7, { width: cols.desc - 12, align: "left" });
-  doc.text("Valor unitário", xUnit, tableY + 7, { width: cols.unit - 6, align: "right" });
-  doc.text("Quantidade", xQty, tableY + 7, { width: cols.qty - 6, align: "right" });
-  doc.text("Total do item", xTotal, tableY + 7, { width: cols.total - 6, align: "right" });
+doc.fillColor(MUTED).font("Helvetica-Bold").fontSize(9);
+doc.text("N°", xN + 6, tableY + 7, { width: cols.n - 8, align: "left" });
+doc.text("Descrição", xDesc + 6, tableY + 7, { width: cols.desc - 12, align: "left" });
+doc.text("Valor unitário", xUnit, tableY + 7, { width: cols.unit - 6, align: "right" });
+doc.text("Quantidade", xQty, tableY + 7, { width: cols.qty - 6, align: "right" });
+doc.text("Total do item", xTotal, tableY + 7, { width: cols.total - 6, align: "right" });
 
-  let y = tableY + 28;
-  const rowH = 19;
+let y = tableY + 28;
+const rowH = 19;
 
-  const reserveBottom = 170;
-  const maxTableY = pageBottom - reserveBottom;
+const reserveBottom = 170;
+const maxTableY = pageBottom - reserveBottom;
 
-  const items = Array.isArray(budget.items) ? budget.items : [];
+const items = Array.isArray(budget.items) ? budget.items : [];
 
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (y + rowH > maxTableY) break;
+for (let i = 0; i < items.length; i++) {
+  const it = items[i];
+  if (y + rowH > maxTableY) break;
 
-    doc
-      .lineWidth(0.5)
-      .strokeColor("#eef2f7")
-      .moveTo(x0 + 8, y + 15)
-      .lineTo(x0 + w0 - 8, y + 15)
-      .stroke();
+  doc
+    .lineWidth(0.5)
+    .strokeColor("#eef2f7")
+    .moveTo(tableInnerX, y + 15)
+    .lineTo(tableInnerX + tableInnerW, y + 15)
+    .stroke();
 
-    const desc = it.description ? `${it.name} — ${it.description}` : it.name;
+  const desc = it.description ? `${it.name} — ${it.description}` : it.name;
 
-    doc.fillColor(TEXT).font("Helvetica").fontSize(9);
-    doc.text(String(i + 1), xN + 6, y, { width: cols.n - 8, align: "left" });
-    doc.text(clipText(desc, 60), xDesc + 6, y, { width: cols.desc - 12, align: "left" });
-    doc.text(moneyBRL(it.unitPriceCents), xUnit, y, { width: cols.unit - 6, align: "right" });
-    doc.text(String(it.quantity || 1), xQty, y, { width: cols.qty - 6, align: "right" });
-    doc.text(moneyBRL(it.totalCents), xTotal, y, { width: cols.total - 6, align: "right" });
+  doc.fillColor(TEXT).font("Helvetica").fontSize(9);
+  doc.text(String(i + 1), xN + 6, y, {
+    width: cols.n - 8,
+    align: "left",
+  });
+  doc.text(clipText(desc, 52), xDesc + 6, y, {
+    width: cols.desc - 12,
+    align: "left",
+  });
+  doc.text(moneyBRL(it.unitPriceCents), xUnit, y, {
+    width: cols.unit - 6,
+    align: "right",
+  });
+  doc.text(String(it.quantity || 1), xQty, y, {
+    width: cols.qty - 6,
+    align: "right",
+  });
+  doc.text(moneyBRL(it.totalCents), xTotal, y, {
+    width: cols.total - 6,
+    align: "right",
+  });
 
-    y += rowH;
-  }
+  y += rowH;
+}
 
   const bottomY = Math.max(y + 14, maxTableY + 10);
 
@@ -390,7 +413,7 @@ async function budgetPdf(req, res) {
   const bottomH = pageBottom - bottomY - 18;
 
   doc.roundedRect(obsX, bottomY, obsW, bottomH, 8).fillAndStroke("#ffffff", BORDER);
-  doc.fillColor(TEXT).font("Helvetica-Bold").fontSize(11).text("Observações", obsX + 10, bottomY + 10);
+  doc.fillColor(TEXT).font("Helvetica-Bold").fontSize(11).text("Observações", obsX + 12, bottomY + 12);
 
   const notesUser = clientNotes(budget.notes);
   const discountCents = Number(budget.discountCents || 0);
@@ -429,8 +452,8 @@ async function budgetPdf(req, res) {
 
   const ref12xCents = Math.round((mode === "PARCELADO" ? totalCents : avistaTotal) / 12);
 
-  const lineY = bottomY + 32;
-  const lineGap = 18;
+  const lineY = bottomY + 34;
+  const lineGap = 20;
 
   doc.fillColor(TEXT).font("Helvetica").fontSize(9);
 
