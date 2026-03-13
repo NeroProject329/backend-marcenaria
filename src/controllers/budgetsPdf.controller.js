@@ -1,29 +1,64 @@
-// controllers/budgetsPdf.controller.js
 const PDFDocument = require("pdfkit");
 const http = require("http");
 const https = require("https");
 const { prisma } = require("../lib/prisma");
 
+const HEADER_START_Y = 74;
+const IMAGE_TIMEOUT_MS = 1500;
+
 function moneyBRL(cents) {
-  const v = (Number(cents) || 0) / 100;
-  return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  return (Number(cents || 0) / 100).toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
 }
 
-function fmtDate(d) {
-  if (!d) return "-";
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return "-";
-  return dt.toLocaleDateString("pt-BR");
+function fmtDate(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("pt-BR");
 }
 
 function onlyDigits(v) {
   return String(v || "").replace(/\D/g, "");
 }
 
-function clipText(s, max = 140) {
+function clipText(s, max = 160) {
   const t = String(s || "").trim();
   if (!t) return "";
-  return t.length > max ? t.slice(0, max - 1).trim() + "…" : t;
+  return t.length > max ? `${t.slice(0, max - 1).trim()}…` : t;
+}
+
+function textEllipsis(doc, text, x, y, w, opts = {}) {
+  doc.text(String(text ?? ""), x, y, {
+    width: w,
+    lineBreak: false,
+    ellipsis: true,
+    ...opts,
+  });
+}
+
+function buildClientAddress(c) {
+  const line1 = [
+    c?.logradouro ? String(c.logradouro).trim() : "",
+    c?.numero ? `nº ${String(c.numero).trim()}` : "",
+    c?.complemento ? String(c.complemento).trim() : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const cityUF = [c?.cidade, c?.estado].filter(Boolean).join(" - ");
+
+  const line2 = [
+    c?.bairro ? String(c.bairro).trim() : "",
+    cityUF || "",
+    c?.cep ? `CEP ${onlyDigits(c.cep)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" - ");
+
+  return [line1, line2].filter(Boolean).join(" - ") || "—";
 }
 
 function clientNotes(raw) {
@@ -42,91 +77,242 @@ function clientNotes(raw) {
   return s.trim();
 }
 
-function buildClientAddress(c) {
-  const line1 = [
-    c?.logradouro ? String(c.logradouro).trim() : "",
-    c?.numero ? `nº ${String(c.numero).trim()}` : "",
-    c?.complemento ? String(c.complemento).trim() : "",
-  ]
-    .filter(Boolean)
-    .join(", ");
-
-  const cityUF = [c?.cidade, c?.estado].filter(Boolean).join(" - ");
-
-  const line2 = [
-    c?.bairro ? String(c.bairro).trim() : "",
-    cityUF ? cityUF : "",
-    c?.cep ? `CEP ${onlyDigits(c.cep)}` : "",
-  ]
-    .filter(Boolean)
-    .join(" - ");
-
-  // ✅ tudo em UMA linha
-  const oneLine = [line1, line2].filter(Boolean).join(" - ");
-
-  return oneLine || "-";
-}
-
-function fetchBuffer(url) {
+function fetchBuffer(url, timeoutMs = IMAGE_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    const isHttps = /^https:/i.test(url);
-    const lib = isHttps ? https : http;
+    try {
+      const lib = /^https:/i.test(url) ? https : http;
 
-    lib
-      .get(url, (res) => {
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode}`));
+      const req = lib.get(
+        url,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 PDFKit",
+            Accept: "*/*",
+          },
+        },
+        (res) => {
+          if (
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            res.resume();
+            clearTimeout(timer);
+            return resolve(fetchBuffer(res.headers.location, timeoutMs));
+          }
+
+          if (res.statusCode !== 200) {
+            res.resume();
+            clearTimeout(timer);
+            return reject(new Error(`HTTP ${res.statusCode}`));
+          }
+
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            clearTimeout(timer);
+            resolve(Buffer.concat(chunks));
+          });
         }
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
-      })
-      .on("error", reject);
+      );
+
+      req.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+
+      const timer = setTimeout(() => {
+        req.destroy(new Error("Image fetch timeout"));
+      }, timeoutMs);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
-function drawBar(doc, x, y, w, h, text, color) {
-  doc.save();
-  doc.rect(x, y, w, h).fill(color);
-  doc.fillColor("#fff").fontSize(10).font("Helvetica-Bold").text(text, x, y + 4, {
-    width: w,
-    align: "center",
-  });
-  doc.restore();
+async function tryDrawLogo(doc, url, x, y, opts = {}) {
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  try {
+    const buf = await fetchBuffer(url, IMAGE_TIMEOUT_MS);
+    doc.image(buf, x, y, opts);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function drawField(doc, x, y, w, label, value, opts = {}) {
-  const { align = "left", valueFontSize = 9 } = opts;
+function drawHeader(doc, budget) {
+  const pageW = doc.page.width;
+  const margin = doc.page.margins.left;
+  const salon = budget.salon || {};
 
-  doc.save();
-
-  // label
-  doc.fillColor("#444").fontSize(7).font("Helvetica").text(label, x, y);
-
-  // value box
-  const boxY = y + 10;
-  const boxH = 16;
+  doc.rect(0, 0, pageW, 58).fill("#0b1220");
 
   doc
-    .lineWidth(0.7)
-    .strokeColor("#cfcfcf")
-    .fillColor("#f2f2f2")
-    .rect(x, boxY, w, boxH)
-    .fillAndStroke();
+    .fillColor("#ffffff")
+    .font("Helvetica-Bold")
+    .fontSize(15)
+    .text("Orçamento", margin, 14, {
+      width: pageW - margin * 2,
+    });
 
-  // value text
-  doc.fillColor("#111").font("Helvetica").fontSize(valueFontSize);
+  doc
+    .fillColor("#cbd5e1")
+    .font("Helvetica")
+    .fontSize(9)
+    .text(
+      `${String(salon.name || "Marcenaria")} • Nº ${String(budget.id || "")
+        .slice(-6)
+        .toUpperCase()}`,
+      margin,
+      34,
+      {
+        width: pageW - margin * 2,
+      }
+    );
 
-  if (align === "center") {
-    doc.text(String(value ?? "-"), x, boxY + 3, { width: w, align: "center" });
-  } else if (align === "right") {
-    doc.text(String(value ?? "-"), x, boxY + 3, { width: w - 6, align: "right" });
-  } else {
-    doc.text(String(value ?? "-"), x + 6, boxY + 3, { width: w - 12, align: "left" });
+  return HEADER_START_Y;
+}
+
+function ensureSpace(doc, y, needed, budget) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  if (y + needed <= bottom) return y;
+  doc.addPage();
+  return drawHeader(doc, budget);
+}
+
+function sectionBox(doc, x, y, w, h, title) {
+  doc.roundedRect(x, y, w, h, 12).fillAndStroke("#ffffff", "#e6eaf2");
+
+  if (title) {
+    doc
+      .fillColor("#0f172a")
+      .font("Helvetica-Bold")
+      .fontSize(12)
+      .text(title, x + 12, y + 10, {
+        width: w - 24,
+      });
   }
 
-  doc.restore();
+  return {
+    x: x + 12,
+    y: y + (title ? 34 : 12),
+    w: w - 24,
+    h: h - (title ? 46 : 24),
+  };
+}
+
+function drawCardsRow(doc, y, cards) {
+  const pageW = doc.page.width;
+  const margin = doc.page.margins.left;
+  const gap = 10;
+  const cols = 3;
+  const w = (pageW - margin * 2 - gap * (cols - 1)) / cols;
+  const h = 64;
+
+  cards.forEach((c, i) => {
+    const x = margin + i * (w + gap);
+    doc.roundedRect(x, y, w, h, 12).fillAndStroke("#f8fafc", "#e6eaf2");
+
+    doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(10);
+    textEllipsis(doc, c.title, x + 12, y + 10, w - 24);
+
+    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14);
+    textEllipsis(doc, c.value, x + 12, y + 30, w - 24);
+
+    if (c.foot) {
+      doc.fillColor("#94a3b8").font("Helvetica").fontSize(9);
+      textEllipsis(doc, c.foot, x + 12, y + 49, w - 24);
+    }
+  });
+
+  return y + h + 18;
+}
+
+function drawKeyValueRows(doc, x, y, w, rows) {
+  const rowH = 17;
+
+  rows.forEach((r, idx) => {
+    const yy = y + idx * rowH;
+
+    doc.fillColor("#0f172a").font("Helvetica").fontSize(10.5);
+    textEllipsis(doc, r.label, x, yy, w - 180);
+
+    doc
+      .fillColor("#0f172a")
+      .font(r.bold ? "Helvetica-Bold" : "Helvetica")
+      .fontSize(10.5);
+    doc.text(String(r.value ?? "—"), x + (w - 170), yy, {
+      width: 170,
+      align: "right",
+      lineBreak: false,
+      ellipsis: true,
+    });
+  });
+
+  return y + rows.length * rowH;
+}
+
+function drawTableHeader(doc, x, y, cols, colW) {
+  const totalW = colW.reduce((a, b) => a + b, 0);
+
+  doc.rect(x, y, totalW, 22).fill("#f8fafc");
+  doc.strokeColor("#e6eaf2").lineWidth(1).rect(x, y, totalW, 22).stroke();
+
+  doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(10);
+
+  let xx = x;
+  cols.forEach((c, i) => {
+    const w = colW[i];
+    doc.text(c, xx + 8, y + 6, {
+      width: w - 16,
+      lineBreak: false,
+      ellipsis: true,
+    });
+    xx += w;
+  });
+
+  return y + 22;
+}
+
+function drawTableRow(doc, x, y, cells, colW, rowH = 18, rightAlignIdx = []) {
+  const totalW = colW.reduce((a, b) => a + b, 0);
+
+  doc
+    .strokeColor("#eef2f7")
+    .lineWidth(1)
+    .moveTo(x, y + rowH)
+    .lineTo(x + totalW, y + rowH)
+    .stroke();
+
+  doc.fillColor("#0f172a").font("Helvetica").fontSize(10);
+
+  let xx = x;
+  cells.forEach((txt, i) => {
+    const w = colW[i];
+    const isRight = rightAlignIdx.includes(i);
+
+    doc.text(String(txt ?? ""), xx + 8, y + 4, {
+      width: w - 16,
+      align: isRight ? "right" : "left",
+      lineBreak: false,
+      ellipsis: true,
+    });
+
+    xx += w;
+  });
+
+  return y + rowH;
+}
+
+function payLabelSafe(budget) {
+  const mode = String(budget?.paymentMode || "AVISTA");
+  const method = budget?.paymentMethod ? ` • ${budget.paymentMethod}` : "";
+  const inst =
+    budget?.installmentsCount && Number(budget.installmentsCount) > 1
+      ? ` • ${budget.installmentsCount}x`
+      : "";
+  return `${mode}${method}${inst}`;
 }
 
 async function budgetPdf(req, res) {
@@ -136,7 +322,14 @@ async function budgetPdf(req, res) {
   const budget = await prisma.budget.findFirst({
     where: { id, salonId },
     include: {
-      salon: { select: { name: true, phone: true, address: true, logoUrl: true } },
+      salon: {
+        select: {
+          name: true,
+          phone: true,
+          address: true,
+          logoUrl: true,
+        },
+      },
       client: {
         select: {
           name: true,
@@ -154,12 +347,13 @@ async function budgetPdf(req, res) {
         },
       },
       items: { orderBy: { createdAt: "asc" } },
-      // ✅ incluir parcelas pra mostrar o valor correto da parcela no PDF
       installments: { orderBy: { number: "asc" } },
     },
   });
 
-  if (!budget) return res.status(404).json({ message: "Orçamento não encontrado." });
+  if (!budget) {
+    return res.status(404).json({ message: "Orçamento não encontrado." });
+  }
 
   const download = String(req.query.download || "") === "1";
   const filename = `orcamento-${budget.id}.pdf`;
@@ -170,271 +364,235 @@ async function budgetPdf(req, res) {
     `${download ? "attachment" : "inline"}; filename="${filename}"`
   );
 
-  const doc = new PDFDocument({ size: "A4", margin: 0 });
+  const doc = new PDFDocument({ size: "A4", margin: 40 });
   doc.pipe(res);
 
-  const ORANGE = "#d85a2a";
-  const BORDER = "#9f9f9f";
+  const pageW = doc.page.width;
+  const margin = doc.page.margins.left;
+  const contentW = pageW - margin * 2;
 
-  const x0 = 40;
-  const y0 = 30;
-  const w0 = 515;
-  const h0 = 780;
-  const pageBottom = y0 + h0;
-
-  doc.lineWidth(1).strokeColor(BORDER).rect(x0, y0, w0, h0).stroke();
+  let y = drawHeader(doc, budget);
 
   const salon = budget.salon || {};
   const client = budget.client || {};
+  const notesUser = clientNotes(budget.notes);
 
-  const headerH = 95;
-  const headerY = y0;
+  await tryDrawLogo(doc, salon.logoUrl, pageW - margin - 46, 10, {
+    fit: [34, 34],
+    align: "right",
+  });
 
-  // logo
-  const logoX = x0 + 10;
-  const logoY = headerY + 12;
-  const logoSize = 55;
+  y = drawCardsRow(doc, y, [
+    {
+      title: "Cliente",
+      value: clipText(client.name || "—", 34),
+      foot: clipText(client.phone || client.email || "Sem contato", 32),
+    },
+    {
+      title: "Data do orçamento",
+      value: fmtDate(budget.createdAt),
+      foot: `Entrega: ${fmtDate(budget.expectedDeliveryAt)}`,
+    },
+    {
+      title: "Status",
+      value: String(budget.status || "RASCUNHO"),
+      foot: payLabelSafe(budget),
+    },
+  ]);
 
-  if (salon.logoUrl && /^https?:\/\//i.test(salon.logoUrl)) {
-    try {
-      const buf = await fetchBuffer(salon.logoUrl);
-      doc.image(buf, logoX, logoY, { fit: [logoSize, logoSize] });
-    } catch {
-      // ignora
-    }
-  }
+  y = ensureSpace(doc, y, 168, budget);
 
-  // box número orçamento
-  const ref = String(budget.id).slice(-4).toUpperCase();
-  const boxW = 88;
-  const boxH = 36;
-  const boxX = x0 + w0 - boxW - 8;
-  const boxY = headerY + 8;
+  const topGap = 10;
+  const halfW = (contentW - topGap) / 2;
 
-  doc.lineWidth(0.9).strokeColor(BORDER).rect(boxX, boxY, boxW, boxH).stroke();
-  doc
-    .fillColor("#333")
-    .font("Helvetica")
-    .fontSize(7)
-    .text("N° Orçamento", boxX, boxY + 6, { width: boxW, align: "center" });
-  doc
-    .fillColor("#111")
-    .font("Helvetica-Bold")
-    .fontSize(14)
-    .text(ref, boxX, boxY + 16, { width: boxW, align: "center" });
+  const leftBox = sectionBox(doc, margin, y, halfW, 138, "Cliente");
+  drawKeyValueRows(doc, leftBox.x, leftBox.y, leftBox.w, [
+    { label: "Nome", value: client.name || "—", bold: true },
+    { label: "CPF/CNPJ", value: client.cpf || "—" },
+    { label: "Telefone", value: client.phone || "—" },
+    { label: "E-mail", value: client.email || "—" },
+    { label: "Endereço", value: clipText(buildClientAddress(client), 72) },
+  ]);
 
-  // título centralizado entre logo e box
-  const titleLeft = x0 + 80;
-  const titleRight = boxX - 10;
-  const titleW = Math.max(200, titleRight - titleLeft);
-
-  doc
-    .fillColor("#111")
-    .font("Helvetica-Bold")
-    .fontSize(14)
-    .text(String(salon.name || "MARCENARIA").toUpperCase(), titleLeft, headerY + 12, {
-      width: titleW,
-      align: "center",
-    });
-
-  // campos do cabeçalho
-  const hfY1 = headerY + 50;
-  const gap = 10;
-
-  const rowX = titleLeft;
-  const rowRight = x0 + w0 - 10;
-  const rowW = rowRight - rowX;
-
-  const wTel = 200;
-  const wData = 140;
-  const wPrev = rowW - wTel - wData - gap * 2;
-
-  drawField(doc, rowX, hfY1, wTel, "Telefone", salon.phone || "-", { align: "center" });
-  drawField(doc, rowX + wTel + gap, hfY1, wData, "Data orçamento", fmtDate(budget.createdAt), { align: "center" });
-  drawField(
+  const rightBox = sectionBox(
     doc,
-    rowX + wTel + gap + wData + gap,
-    hfY1,
-    wPrev,
-    "Previsão entrega",
-    fmtDate(budget.expectedDeliveryAt),
-    { align: "center" }
+    margin + halfW + topGap,
+    y,
+    halfW,
+    138,
+    "Empresa"
   );
+  drawKeyValueRows(doc, rightBox.x, rightBox.y, rightBox.w, [
+    { label: "Nome", value: salon.name || "—", bold: true },
+    { label: "Telefone", value: salon.phone || "—" },
+    { label: "Endereço", value: clipText(salon.address || "—", 72) },
+    {
+      label: "Nº orçamento",
+      value: String(budget.id || "").slice(-6).toUpperCase(),
+    },
+    { label: "Previsão de entrega", value: fmtDate(budget.expectedDeliveryAt) },
+  ]);
 
-  // ✅ ENDEREÇO DO TOPO CENTRALIZADO (era left)
-  drawField(doc, rowX, hfY1 + 30, rowW, "Endereço", salon.address || "-", { align: "center", valueFontSize: 8 });
-
-  // ===== CLIENTE =====
-  const clientBarY = headerY + headerH + 12;
-  drawBar(doc, x0, clientBarY, w0, 18, "CLIENTE", ORANGE);
-
-  const cY = clientBarY + 26;
-
-  const wNome = 250;
-  const wCpf = 120;
-  const wTel2 = w0 - wNome - wCpf - gap * 2;
-
-  drawField(doc, x0, cY, wNome, "Nome", client.name || "-", { align: "left" });
-  drawField(doc, x0 + wNome + gap, cY, wCpf, "CPF/CNPJ", client.cpf || "-", { align: "center" });
-  drawField(doc, x0 + wNome + gap + wCpf + gap, cY, wTel2, "Telefone", client.phone || "-", { align: "center" });
-
-  const cY2 = cY + 38;
-  const wAddr = 360;
-  const wEmail = w0 - wAddr - gap;
-
-  drawField(
-  doc,
-  x0,
-  cY2,
-  wAddr,
-  "Endereço",
-  clipText(buildClientAddress(client), 72),
-  { align: "left", valueFontSize: 8 }
-);
-
-  drawField(
-    doc,
-    x0 + wAddr + gap,
-    cY2,
-    wEmail,
-    "E-mail",
-    clipText(client.email || "-", 34),
-    { align: "center", valueFontSize: 8 }
-  );
-
-  // ===== ORÇAMENTO =====
-  const budgetBarY = cY2 + 52;
-  drawBar(doc, x0, budgetBarY, w0, 18, "ORÇAMENTO", ORANGE);
-
-  // ===== Tabela itens =====
-  const tableY = budgetBarY + 28;
-
-  const cols = { n: 30, desc: 245, unit: 95, qty: 70, total: 75 };
-
-  const xN = x0;
-  const xDesc = xN + cols.n;
-  const xUnit = xDesc + cols.desc;
-  const xQty = xUnit + cols.unit;
-  const xTotal = xQty + cols.qty;
-
-  doc.fillColor("#efefef").rect(x0, tableY, w0, 20).fill();
-  doc.lineWidth(0.8).strokeColor("#d0d0d0").rect(x0, tableY, w0, 20).stroke();
-
-  doc.fillColor("#111").font("Helvetica-Bold").fontSize(9);
-  doc.text("N°", xN + 6, tableY + 6, { width: cols.n - 8, align: "left" });
-  doc.text("Descrição", xDesc + 6, tableY + 6, { width: cols.desc - 12, align: "left" });
-  doc.text("Valor unitário", xUnit, tableY + 6, { width: cols.unit - 6, align: "right" });
-  doc.text("Quantidade", xQty, tableY + 6, { width: cols.qty - 6, align: "right" });
-  doc.text("Total do item", xTotal, tableY + 6, { width: cols.total - 6, align: "right" });
-
-  let y = tableY + 26;
-  const rowH = 18;
-
-  const reserveBottom = 170;
-  const maxTableY = pageBottom - reserveBottom;
+  y += 156;
 
   const items = Array.isArray(budget.items) ? budget.items : [];
 
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (y + rowH > maxTableY) break;
+  y = ensureSpace(doc, y, 120, budget);
+  doc
+    .fillColor("#0f172a")
+    .font("Helvetica-Bold")
+    .fontSize(14)
+    .text("Itens do orçamento", margin, y);
+  y += 12;
 
-    doc
-      .lineWidth(0.5)
-      .strokeColor("#e1e1e1")
-      .moveTo(x0, y + 14)
-      .lineTo(x0 + w0, y + 14)
-      .stroke();
+  const tableCols = ["#", "Descrição", "Valor unit.", "Qtd", "Total"];
+  const tableW = [40, 255, 90, 55, 75];
+  y = drawTableHeader(doc, margin, y, tableCols, tableW);
 
-    const desc = it.description ? `${it.name} — ${it.description}` : it.name;
+  if (!items.length) {
+    y = drawTableRow(
+      doc,
+      margin,
+      y,
+      ["—", "Nenhum item cadastrado", moneyBRL(0), "0", moneyBRL(0)],
+      tableW,
+      18,
+      [2, 3, 4]
+    );
+  } else {
+    for (let i = 0; i < items.length; i++) {
+      const nextY = ensureSpace(doc, y, 28, budget);
 
-    doc.fillColor("#111").font("Helvetica").fontSize(9);
-    doc.text(String(i + 1), xN + 6, y, { width: cols.n - 8, align: "left" });
-    doc.text(clipText(desc, 60), xDesc + 6, y, { width: cols.desc - 12, align: "left" });
-    doc.text(moneyBRL(it.unitPriceCents), xUnit, y, { width: cols.unit - 6, align: "right" });
-    doc.text(String(it.quantity || 1), xQty, y, { width: cols.qty - 6, align: "right" });
-    doc.text(moneyBRL(it.totalCents), xTotal, y, { width: cols.total - 6, align: "right" });
+      if (nextY !== y) {
+        y = nextY;
+        doc
+          .fillColor("#0f172a")
+          .font("Helvetica-Bold")
+          .fontSize(14)
+          .text("Itens do orçamento", margin, y);
+        y += 12;
+        y = drawTableHeader(doc, margin, y, tableCols, tableW);
+      } else {
+        y = nextY;
+      }
 
-    y += rowH;
-  }
+      const it = items[i];
+      const desc = it.description ? `${it.name} — ${it.description}` : it.name;
 
-  // ===== Observações + Valores =====
-  const bottomY = Math.max(y + 12, maxTableY + 10);
-
-  const obsW = 330;
-  const valW = 175;
-  const gap2 = 10;
-
-  const obsX = x0;
-  const valX = x0 + obsW + gap2;
-
-  const bottomH = pageBottom - bottomY - 18;
-
-  // Observações
-  doc.lineWidth(0.9).strokeColor(BORDER).rect(obsX, bottomY, obsW, bottomH).stroke();
-  doc.fillColor("#111").font("Helvetica-Bold").fontSize(10).text("Observações:", obsX + 8, bottomY + 8);
-
-  const notesUser = clientNotes(budget.notes);
-
-  const discountCents = Number(budget.discountCents || 0);
-  const baseTotal = Number(budget.subtotalCents || 0);
-  const totalCents = Number(budget.totalCents || 0);
-
-  const autoObs = [
-    notesUser ? notesUser : "—",
-    "",
-    "• Validade sugerida: 7 dias.",
-    "• Valores sujeitos a reajuste após esse período.",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  doc.fillColor("#222").font("Helvetica").fontSize(9).text(autoObs, obsX + 8, bottomY + 24, {
-    width: obsW - 16,
-    height: bottomH - 32,
-  });
-
-  // ===== VALORES (NOVO COMPORTAMENTO) =====
-  doc.lineWidth(0.9).strokeColor(BORDER).rect(valX, bottomY, valW, bottomH).stroke();
-  drawBar(doc, valX, bottomY, valW, 18, "VALORES", ORANGE);
-
-  const mode = String(budget.paymentMode || "AVISTA").toUpperCase();
-  const installmentsCount = Number(budget.installmentsCount || 1);
-
-  // valor final que o cliente paga
-  const avistaTotal = Math.max(0, baseTotal - discountCents);
-
-  // parcela (usa a 1ª do budget.installments se existir, senão divide)
-  let perInstallmentCents = 0;
-  if (mode === "PARCELADO" && installmentsCount > 1) {
-    if (Array.isArray(budget.installments) && budget.installments.length) {
-      perInstallmentCents = Number(budget.installments[0].amountCents || 0);
-    } else {
-      perInstallmentCents = Math.round(totalCents / installmentsCount);
+      y = drawTableRow(
+        doc,
+        margin,
+        y,
+        [
+          String(i + 1),
+          clipText(desc || "—", 80),
+          moneyBRL(it.unitPriceCents),
+          String(it.quantity || 1),
+          moneyBRL(it.totalCents),
+        ],
+        tableW,
+        18,
+        [2, 3, 4]
+      );
     }
   }
 
-  const lineY = bottomY + 30;
-  doc.fillColor("#111").font("Helvetica").fontSize(9);
+  y += 16;
 
+  y = ensureSpace(doc, y, 210, budget);
+
+  const gapBottom = 10;
+  const obsW = 320;
+  const valW = contentW - obsW - gapBottom;
+
+  const obsBox = sectionBox(doc, margin, y, obsW, 152, "Observações");
+  const obsText = [
+    notesUser || "—",
+    "",
+    "• Validade sugerida: 7 dias.",
+    "• Valores sujeitos a reajuste após esse período.",
+  ].join("\n");
+
+  doc
+    .fillColor("#0f172a")
+    .font("Helvetica")
+    .fontSize(10)
+    .text(obsText, obsBox.x, obsBox.y, {
+      width: obsBox.w,
+      height: obsBox.h,
+    });
+
+  const valBox = sectionBox(
+    doc,
+    margin + obsW + gapBottom,
+    y,
+    valW,
+    152,
+    "Valores"
+  );
+
+  const mode = String(budget.paymentMode || "AVISTA").toUpperCase();
+  const installmentsCount = Math.max(1, Number(budget.installmentsCount || 1));
+  const baseTotal = Number(budget.subtotalCents || 0);
+  const totalCents = Number(budget.totalCents || 0);
+  const discountCents = Number(budget.discountCents || 0);
+  const avistaTotal = Math.max(0, baseTotal - discountCents) || totalCents;
+
+  let parcelValue = 0;
   if (mode === "PARCELADO" && installmentsCount > 1) {
-    // ✅ Parcelado: Valor total + “Nx de R$”
-    doc.text("Valor total:", valX + 8, lineY, { width: valW - 16 });
-    doc.font("Helvetica-Bold").text(moneyBRL(totalCents), valX + 8, lineY, { width: valW - 16, align: "right" });
-
-    doc.font("Helvetica").text(`${installmentsCount}x de:`, valX + 8, lineY + 18, { width: valW - 16 });
-    doc.font("Helvetica-Bold").text(moneyBRL(perInstallmentCents), valX + 8, lineY + 18, {
-      width: valW - 16,
-      align: "right",
-    });
-  } else {
-    // ✅ À vista: “À vista:” + valor final (com desconto se houver)
-    doc.text("À vista:", valX + 8, lineY, { width: valW - 16 });
-    doc.font("Helvetica-Bold").text(moneyBRL(avistaTotal || totalCents), valX + 8, lineY, {
-      width: valW - 16,
-      align: "right",
-    });
+    if (Array.isArray(budget.installments) && budget.installments.length) {
+      parcelValue = Number(budget.installments[0].amountCents || 0);
+    } else {
+      parcelValue = Math.round(totalCents / installmentsCount);
+    }
   }
+
+  const ref12x = Math.round(
+    (mode === "PARCELADO" ? totalCents : avistaTotal) / 12
+  );
+
+  const valueRows =
+    mode === "PARCELADO" && installmentsCount > 1
+      ? [
+          { label: "Valor total", value: moneyBRL(totalCents), bold: true },
+          { label: "Nº de parcelas", value: `${installmentsCount}x` },
+          {
+            label: "Valor por parcela",
+            value: moneyBRL(parcelValue),
+            bold: true,
+          },
+          { label: "Referência em 12x", value: moneyBRL(ref12x) },
+        ]
+      : [
+          { label: "À vista", value: moneyBRL(avistaTotal), bold: true },
+          { label: "Referência em 12x", value: moneyBRL(ref12x) },
+          { label: "Forma de pagamento", value: budget.paymentMethod || "—" },
+        ];
+
+  drawKeyValueRows(doc, valBox.x, valBox.y, valBox.w, valueRows);
+
+  y += 170;
+
+  y = ensureSpace(doc, y, 70, budget);
+  doc
+    .strokeColor("#e6eaf2")
+    .lineWidth(1)
+    .moveTo(margin, y)
+    .lineTo(pageW - margin, y)
+    .stroke();
+
+  y += 10;
+
+  doc.fillColor("#64748b").font("Helvetica").fontSize(9);
+  doc.text(
+    "Documento gerado automaticamente pelo sistema. Este orçamento pode sofrer ajustes conforme materiais, prazo e condições comerciais.",
+    margin,
+    y,
+    {
+      width: contentW,
+      align: "left",
+    }
+  );
 
   doc.end();
 }
