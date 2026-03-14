@@ -307,7 +307,7 @@ async function budgetPdf(req, res) {
   );
 
   const cY2 = cY + 40;
-  const wAddr = 360;
+  const wAddr = 336;
   const wEmail = w0 - wAddr - gap - 16;
 
   drawField(doc, x0 + 8, cY2, wAddr, "Endereço", clipText(buildClientAddress(client), 72), {
@@ -329,77 +329,77 @@ async function budgetPdf(req, res) {
   drawBar(doc, x0 + 8, budgetBarY, w0 - 16, 20, "ORÇAMENTO", BLUE);
 
   const tableY = budgetBarY + 30;
-const tableInnerX = x0 + 8;
-const tableInnerW = w0 - 16;
+  const tableInnerX = x0 + 8;
+  const tableInnerW = w0 - 16;
 
-const cols = {
-  n: 30,
-  desc: 210,
-  unit: 100,
-  qty: 64,
-  total: tableInnerW - (30 + 210 + 100 + 64),
-};
+  const cols = {
+    n: 30,
+    desc: 210,
+    unit: 100,
+    qty: 64,
+    total: tableInnerW - (30 + 210 + 100 + 64),
+  };
 
-const xN = tableInnerX;
-const xDesc = xN + cols.n;
-const xUnit = xDesc + cols.desc;
-const xQty = xUnit + cols.unit;
-const xTotal = xQty + cols.qty;
+  const xN = tableInnerX;
+  const xDesc = xN + cols.n;
+  const xUnit = xDesc + cols.desc;
+  const xQty = xUnit + cols.unit;
+  const xTotal = xQty + cols.qty;
 
-doc.roundedRect(tableInnerX, tableY, tableInnerW, 22, 6).fillAndStroke(SOFT, BORDER);
+  doc.roundedRect(tableInnerX, tableY, tableInnerW, 22, 6).fillAndStroke(SOFT, BORDER);
 
-doc.fillColor(MUTED).font("Helvetica-Bold").fontSize(9);
-doc.text("N°", xN + 6, tableY + 7, { width: cols.n - 8, align: "left" });
-doc.text("Descrição", xDesc + 6, tableY + 7, { width: cols.desc - 12, align: "left" });
-doc.text("Valor unitário", xUnit, tableY + 7, { width: cols.unit - 6, align: "right" });
-doc.text("Quantidade", xQty, tableY + 7, { width: cols.qty - 6, align: "right" });
-doc.text("Total do item", xTotal, tableY + 7, { width: cols.total - 6, align: "right" });
+  doc.fillColor(MUTED).font("Helvetica-Bold").fontSize(9);
+  doc.text("N°", xN + 6, tableY + 7, { width: cols.n - 8, align: "left" });
+  doc.text("Descrição", xDesc + 6, tableY + 7, { width: cols.desc - 12, align: "left" });
+  doc.text("Valor unitário", xUnit, tableY + 7, { width: cols.unit - 6, align: "right" });
+  doc.text("Quantidade", xQty, tableY + 7, { width: cols.qty - 6, align: "right" });
+  doc.text("Total do item", xTotal, tableY + 7, { width: cols.total - 6, align: "right" });
 
-let y = tableY + 28;
-const rowH = 19;
+  let y = tableY + 28;
+  const rowH = 19;
 
-const reserveBottom = 170;
-const maxTableY = pageBottom - reserveBottom;
+  const reserveBottom = 170;
+  const maxTableY = pageBottom - reserveBottom;
 
-const items = Array.isArray(budget.items) ? budget.items : [];
+  const items = Array.isArray(budget.items) ? budget.items : [];
 
-for (let i = 0; i < items.length; i++) {
-  const it = items[i];
-  if (y + rowH > maxTableY) break;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (y + rowH > maxTableY) break;
 
-  doc
-    .lineWidth(0.5)
-    .strokeColor("#eef2f7")
-    .moveTo(tableInnerX, y + 15)
-    .lineTo(tableInnerX + tableInnerW, y + 15)
-    .stroke();
+    doc
+      .lineWidth(0.5)
+      .strokeColor("#eef2f7")
+      .moveTo(tableInnerX, y + 15)
+      .lineTo(tableInnerX + tableInnerW, y + 15)
+      .stroke();
 
-  const desc = it.description ? `${it.name} — ${it.description}` : it.name;
+    const desc = it.description ? `${it.name} — ${it.description}` : it.name;
 
-  doc.fillColor(TEXT).font("Helvetica").fontSize(9);
-  doc.text(String(i + 1), xN + 6, y, {
-    width: cols.n - 8,
-    align: "left",
-  });
-  doc.text(clipText(desc, 52), xDesc + 6, y, {
-    width: cols.desc - 12,
-    align: "left",
-  });
-  doc.text(moneyBRL(it.unitPriceCents), xUnit, y, {
-    width: cols.unit - 6,
-    align: "right",
-  });
-  doc.text(String(it.quantity || 1), xQty, y, {
-    width: cols.qty - 6,
-    align: "right",
-  });
-  doc.text(moneyBRL(it.totalCents), xTotal, y, {
-    width: cols.total - 6,
-    align: "right",
-  });
+    doc.fillColor(TEXT).font("Helvetica").fontSize(9);
+    doc.text(String(i + 1), xN + 6, y, {
+      width: cols.n - 8,
+      align: "left",
+    });
+    doc.text(clipText(desc, 52), xDesc + 6, y, {
+      width: cols.desc - 12,
+      align: "left",
+    });
+    doc.text(moneyBRL(it.unitPriceCents), xUnit, y, {
+      width: cols.unit - 6,
+      align: "right",
+    });
+    doc.text(String(it.quantity || 1), xQty, y, {
+      width: cols.qty - 6,
+      align: "right",
+    });
+    doc.text(moneyBRL(it.totalCents), xTotal, y, {
+      width: cols.total - 6,
+      align: "right",
+    });
 
-  y += rowH;
-}
+    y += rowH;
+  }
 
   const bottomY = Math.max(y + 14, maxTableY + 10);
 
@@ -452,56 +452,54 @@ for (let i = 0; i < items.length; i++) {
 
   const ref12xCents = Math.round((mode === "PARCELADO" ? totalCents : avistaTotal) / 12);
 
-  const lineY = bottomY + 34;
-  const lineGap = 20;
+  const valueRows =
+    mode === "PARCELADO" && installmentsCount > 1
+      ? [
+          { label: "Valor total", value: moneyBRL(totalCents), strong: true },
+          { label: "Parcelas", value: `${installmentsCount}x` },
+          { label: "Valor por parcela", value: moneyBRL(perInstallmentCents), strong: true },
+          { label: "Referência em 12x", value: moneyBRL(ref12xCents) },
+        ]
+      : [
+          { label: "À vista", value: moneyBRL(avistaTotal), strong: true },
+          { label: "Referência em 12x", value: moneyBRL(ref12xCents) },
+        ];
 
-  doc.fillColor(TEXT).font("Helvetica").fontSize(9);
+  const rowsTop = bottomY + 30;
+  const rowsLeft = valX + 10;
+  const rowsWidth = valW - 20;
+  const rowHeight = 28;
 
-  if (mode === "PARCELADO" && installmentsCount > 1) {
-    doc.text("Valor total:", valX + 8, lineY, { width: valW - 16 });
-    doc.font("Helvetica-Bold").text(moneyBRL(totalCents), valX + 8, lineY, {
-      width: valW - 16,
-      align: "right",
-    });
+  valueRows.forEach((row, idx) => {
+    const yy = rowsTop + idx * rowHeight;
 
-    doc.font("Helvetica").text("Parcelas:", valX + 8, lineY + lineGap, {
-      width: valW - 16,
-    });
-    doc.font("Helvetica-Bold").text(`${installmentsCount}x`, valX + 8, lineY + lineGap, {
-      width: valW - 16,
-      align: "right",
-    });
+    if (idx > 0) {
+      doc
+        .strokeColor("#eef2f7")
+        .lineWidth(0.8)
+        .moveTo(rowsLeft, yy - 6)
+        .lineTo(rowsLeft + rowsWidth, yy - 6)
+        .stroke();
+    }
 
-    doc.font("Helvetica").text("Valor por parcela:", valX + 8, lineY + lineGap * 2, {
-      width: valW - 16,
-    });
-    doc.font("Helvetica-Bold").text(moneyBRL(perInstallmentCents), valX + 8, lineY + lineGap * 2, {
-      width: valW - 16,
-      align: "right",
-    });
+    doc
+      .fillColor(TEXT)
+      .font("Helvetica")
+      .fontSize(9)
+      .text(`${row.label}:`, rowsLeft, yy, {
+        width: rowsWidth * 0.54,
+        align: "left",
+      });
 
-    doc.font("Helvetica").text("Referência em 12x:", valX + 8, lineY + lineGap * 3, {
-      width: valW - 16,
-    });
-    doc.font("Helvetica-Bold").text(moneyBRL(ref12xCents), valX + 8, lineY + lineGap * 3, {
-      width: valW - 16,
-      align: "right",
-    });
-  } else {
-    doc.text("À vista:", valX + 8, lineY, { width: valW - 16 });
-    doc.font("Helvetica-Bold").text(moneyBRL(avistaTotal), valX + 8, lineY, {
-      width: valW - 16,
-      align: "right",
-    });
-
-    doc.font("Helvetica").text("Referência em 12x:", valX + 8, lineY + lineGap, {
-      width: valW - 16,
-    });
-    doc.font("Helvetica-Bold").text(moneyBRL(ref12xCents), valX + 8, lineY + lineGap, {
-      width: valW - 16,
-      align: "right",
-    });
-  }
+    doc
+      .fillColor(TEXT)
+      .font(row.strong ? "Helvetica-Bold" : "Helvetica-Bold")
+      .fontSize(row.strong ? 10 : 9)
+      .text(String(row.value || "—"), rowsLeft + rowsWidth * 0.46, yy, {
+        width: rowsWidth * 0.54,
+        align: "right",
+      });
+  });
 
   const footerY = pageBottom - 10;
   doc.fillColor(MUTED).font("Helvetica").fontSize(8);
