@@ -144,9 +144,6 @@ function computeBudgetFromInputs({
   itemsNorm,
   deliveryDays,
   dailyRateCents,
-  paymentMode,
-  paymentMethod,
-  installmentsCount,
   cardFeePercentInput,
   extras,
   profitPercent,
@@ -154,7 +151,7 @@ function computeBudgetFromInputs({
   discountPercent,
   discountCentsRaw,
 }) {
-  // 1) materiais (somatório de todos os materiais em todos os itens)
+  // 1) materiais
   let materialsCents = 0;
   for (const it of itemsNorm) {
     const qtyItem = Number(it.quantity || 0);
@@ -170,68 +167,75 @@ function computeBudgetFromInputs({
     materialsCents += Number.isFinite(itemMatTotal) ? itemMatTotal : 0;
   }
 
-  // 2) custo do dia (dias_fabricação * custo_do_dia)
+  // 2) mão de obra / custo do dia
   const days = Math.max(0, Number(deliveryDays || 0));
   const daily = Math.max(0, Number(dailyRateCents || 0));
   const laborCents = Math.round(days) * Math.round(daily);
 
-  // 3) custo do projeto (material + custo do dia total)
+  // 3) custo do projeto
   const projectCostCents = Math.max(0, materialsCents + laborCents);
 
-  // 4) taxa cartão (somente se PARCELADO + CARTAO)
-  let cardFeePercent = 0;
-  if (paymentMode === "PARCELADO" && paymentMethod === "CARTAO") {
-    const pct = Number(cardFeePercentInput);
-    cardFeePercent = Number.isFinite(pct) && pct >= 0 ? pct : 12.3;
-  }
-
-  const cardFeeCents =
-    cardFeePercent > 0 ? Math.round(projectCostCents * (cardFeePercent / 100)) : 0;
-
-  // 5) custos adicionais (lista)
+  // 4) custos adicionais
   const extrasNorm = Array.isArray(extras) ? extras : [];
   const extrasCents = extrasNorm.reduce((acc, e) => acc + (Number(e.amountCents) || 0), 0);
 
-  // 6) base para lucro
-  const baseWithExtrasCents = Math.max(0, projectCostCents + cardFeeCents + extrasCents);
+  // 5) base antes do lucro
+  const baseBeforeProfitCents = Math.max(0, projectCostCents + extrasCents);
 
-  // 7) lucro %
+  // 6) lucro
   const p = Number(profitPercent);
   const profitPct = Number.isFinite(p) && p >= 0 ? p : 0;
-  const profitCents = profitPct > 0 ? Math.round(baseWithExtrasCents * (profitPct / 100)) : 0;
+  const profitCents =
+    profitPct > 0 ? Math.round(baseBeforeProfitCents * (profitPct / 100)) : 0;
 
-  const totalBeforeDiscountCents = Math.max(0, baseWithExtrasCents + profitCents);
+  // 7) bruto comum
+  const grossTotalCents = Math.max(0, baseBeforeProfitCents + profitCents);
 
-  // 8) desconto (apenas à vista)
+  // 8) desconto à vista
   let effectiveDiscountCents = 0;
-  if (paymentMode === "AVISTA") {
-    if (discountType === "PERCENT") {
-      const dp = Number(discountPercent);
-      const pct = Number.isFinite(dp) && dp > 0 ? dp : 0;
-      effectiveDiscountCents = Math.round(totalBeforeDiscountCents * (pct / 100));
-    } else {
-      effectiveDiscountCents = Math.max(0, Number(discountCentsRaw) || 0);
-    }
+  if (discountType === "PERCENT") {
+    const dp = Number(discountPercent);
+    const pct = Number.isFinite(dp) && dp > 0 ? dp : 0;
+    effectiveDiscountCents = Math.round(grossTotalCents * (pct / 100));
+  } else {
+    effectiveDiscountCents = Math.max(0, Number(discountCentsRaw) || 0);
   }
 
-  if (effectiveDiscountCents > totalBeforeDiscountCents) {
-    effectiveDiscountCents = totalBeforeDiscountCents;
+  if (effectiveDiscountCents > grossTotalCents) {
+    effectiveDiscountCents = grossTotalCents;
   }
 
-  const totalCents = Math.max(0, totalBeforeDiscountCents - effectiveDiscountCents);
+  const cashTotalCents = Math.max(0, grossTotalCents - effectiveDiscountCents);
+
+  // 9) taxa parcelado
+  const pctCard = Number(cardFeePercentInput);
+  const cardFeePercent =
+    Number.isFinite(pctCard) && pctCard >= 0 ? pctCard : 0;
+
+  const cardFeeCents =
+    cardFeePercent > 0 ? Math.round(grossTotalCents * (cardFeePercent / 100)) : 0;
+
+  const installmentTotalCents = Math.max(0, grossTotalCents + cardFeeCents);
 
   return {
     materialsCents,
     laborCents,
     projectCostCents,
-    cardFeePercent,
-    cardFeeCents,
     extrasCents,
     profitPercent: profitPct,
     profitCents,
-    totalBeforeDiscountCents,
+
+    // legado / compatibilidade
+    totalBeforeDiscountCents: grossTotalCents,
     discountCents: effectiveDiscountCents,
-    totalCents,
+    totalCents: cashTotalCents,
+
+    // novos
+    grossTotalCents,
+    cashTotalCents,
+    cardFeePercent,
+    cardFeeCents,
+    installmentTotalCents,
   };
 }
 
@@ -241,24 +245,11 @@ function buildCommercialSnapshot({
 }) {
   const count = Math.max(1, Number(installmentsCount || 1));
 
-  // bruto comum do orçamento
-  // no cálculo atual, totalBeforeDiscount pode estar com cardFee embutida
-  // então removemos a taxa para chegar na base comum
-  const grossTotalCents = Math.max(
-    0,
-    Number(computed.totalBeforeDiscountCents || 0) - Number(computed.cardFeeCents || 0)
-  );
-
-  // à vista = bruto - desconto
-  const cashTotalCents = Math.max(
-    0,
-    grossTotalCents - Number(computed.discountCents || 0)
-  );
-
-  // parcelado = bruto + taxa
+  const grossTotalCents = Math.max(0, Number(computed.grossTotalCents || 0));
+  const cashTotalCents = Math.max(0, Number(computed.cashTotalCents || 0));
   const installmentTotalCents = Math.max(
     0,
-    grossTotalCents + Number(computed.cardFeeCents || 0)
+    Number(computed.installmentTotalCents || 0)
   );
 
   const installmentAmountCents = Math.max(
@@ -441,10 +432,11 @@ async function createBudget(req, res) {
   if (dr.value !== null && dr.value < 0) return res.status(400).json({ message: "dailyRateCents inválido." });
 
   // desconto
-  const discTypeNorm = normalizeDiscountType(discountType) || "VALOR";
-  if (discountType !== undefined && discTypeNorm === null) {
-    return res.status(400).json({ message: "discountType inválido (VALOR ou PERCENT)." });
-  }
+ const discTypeParsed = normalizeDiscountType(discountType);
+if (discountType !== undefined && discTypeParsed === null) {
+  return res.status(400).json({ message: "discountType inválido (VALOR ou PERCENT)." });
+}
+const discTypeNorm = discTypeParsed ?? "VALOR";
 
   const discCentsRaw = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
   if (!discCentsRaw.ok) return res.status(400).json({ message: discCentsRaw.message });
@@ -454,10 +446,11 @@ async function createBudget(req, res) {
   if (!discPctRaw.ok) return res.status(400).json({ message: discPctRaw.message });
 
   // pagamento
-  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
-  if (paymentMode !== undefined && modeNorm === null) {
-    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
-  }
+const modeParsed = normalizePaymentMode(paymentMode);
+if (paymentMode !== undefined && modeParsed === null) {
+  return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
+}
+const modeNorm = modeParsed ?? "AVISTA";
 
   const methodNorm = normalizePaymentMethod(paymentMethod);
   if (paymentMethod !== undefined && methodNorm === null) {
@@ -568,16 +561,16 @@ async function createBudget(req, res) {
     }
 
     const built = validateAndBuildBudgetInstallments({
-      installments,
-      totalCents: computed.totalCents,
-    });
+  installments,
+  totalCents: commercial.installmentTotalCents,
+});
 
     if (!built.ok) return res.status(400).json({ message: built.error });
 
     finalFirstDueDate = built.firstDueDate;
     budgetInstallmentsData = built.installmentsData;
   } else if (modeNorm === "PARCELADO") {
-    const amounts = splitIntoInstallments(computed.totalCents, count);
+    const amounts = splitIntoInstallments(commercial.installmentTotalCents, count);
     budgetInstallmentsData = amounts.map((amt, idx) => ({
       number: idx + 1,
       dueDate: addMonths(baseDue, idx),
@@ -722,10 +715,11 @@ async function updateBudgetFull(req, res) {
   if (!dr.ok) return res.status(400).json({ message: dr.message });
   if (dr.value !== null && dr.value < 0) return res.status(400).json({ message: "dailyRateCents inválido." });
 
-  const discTypeNorm = normalizeDiscountType(discountType) || "VALOR";
-  if (discountType !== undefined && discTypeNorm === null) {
-    return res.status(400).json({ message: "discountType inválido (VALOR ou PERCENT)." });
-  }
+const discTypeParsed = normalizeDiscountType(discountType);
+if (discountType !== undefined && discTypeParsed === null) {
+  return res.status(400).json({ message: "discountType inválido (VALOR ou PERCENT)." });
+}
+const discTypeNorm = discTypeParsed ?? "VALOR";
 
   const discCentsRaw = discountCents !== undefined ? toInt(discountCents, "discountCents") : { ok: true, value: 0 };
   if (!discCentsRaw.ok) return res.status(400).json({ message: discCentsRaw.message });
@@ -738,10 +732,11 @@ async function updateBudgetFull(req, res) {
     return res.status(400).json({ message: "items deve ser um array com pelo menos 1 item." });
   }
 
-  const modeNorm = normalizePaymentMode(paymentMode) || "AVISTA";
-  if (paymentMode !== undefined && modeNorm === null) {
-    return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
-  }
+const modeParsed = normalizePaymentMode(paymentMode);
+if (paymentMode !== undefined && modeParsed === null) {
+  return res.status(400).json({ message: "paymentMode inválido (AVISTA ou PARCELADO)." });
+}
+const modeNorm = modeParsed ?? "AVISTA";
 
   const methodNorm = normalizePaymentMethod(paymentMethod);
   if (paymentMethod !== undefined && methodNorm === null) {
@@ -842,16 +837,16 @@ async function updateBudgetFull(req, res) {
     }
 
     const built = validateAndBuildBudgetInstallments({
-      installments,
-      totalCents: computed.totalCents,
-    });
+  installments,
+  totalCents: commercial.installmentTotalCents,
+});
 
     if (!built.ok) return res.status(400).json({ message: built.error });
 
     finalFirstDueDate = built.firstDueDate;
     budgetInstallmentsData = built.installmentsData;
   } else if (modeNorm === "PARCELADO") {
-    const amounts = splitIntoInstallments(computed.totalCents, count);
+    const amounts = splitIntoInstallments(commercial.installmentTotalCents, count);
     budgetInstallmentsData = amounts.map((amt, idx) => ({
       number: idx + 1,
       dueDate: addMonths(baseDue, idx),
