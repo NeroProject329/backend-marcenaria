@@ -437,33 +437,47 @@ async function budgetPdf(req, res) {
   doc.roundedRect(valX, bottomY, valW, bottomH, 8).fillAndStroke("#ffffff", BORDER);
   drawBar(doc, valX, bottomY, valW, 20, "VALORES", BLUE);
 
-  const mode = String(budget.paymentMode || "AVISTA").toUpperCase();
-  const installmentsCount = Math.max(1, Number(budget.installmentsCount || 1));
-  const avistaTotal = Math.max(0, baseTotal - discountCents) || totalCents;
+ const grossTotalCents = Number(
+  budget.grossTotalCents || budget.subtotalCents || budget.totalBeforeDiscountCents || 0
+);
 
-  let perInstallmentCents = 0;
-  if (mode === "PARCELADO" && installmentsCount > 1) {
-    if (Array.isArray(budget.installments) && budget.installments.length) {
-      perInstallmentCents = Number(budget.installments[0].amountCents || 0);
-    } else {
-      perInstallmentCents = Math.round(totalCents / installmentsCount);
-    }
+const cashTotalCents = Number(
+  budget.cashTotalCents || budget.totalCents || Math.max(0, grossTotalCents - discountCents)
+);
+
+const installmentsCount = Math.max(2, Number(budget.installmentsCount || 2));
+
+const installmentTotalCents = Number(
+  budget.installmentTotalCents ||
+    (budget.cardFeeCents ? grossTotalCents + Number(budget.cardFeeCents || 0) : budget.totalCents || 0)
+);
+
+let perInstallmentCents = Number(
+  budget.installmentAmountCents || 0
+);
+
+if (perInstallmentCents <= 0) {
+  if (Array.isArray(budget.installments) && budget.installments.length) {
+    perInstallmentCents = Number(budget.installments[0].amountCents || 0);
+  } else {
+    perInstallmentCents = Math.round(installmentTotalCents / installmentsCount);
   }
+}
 
-  const ref12xCents = Math.round((mode === "PARCELADO" ? totalCents : avistaTotal) / 12);
+const showRef12x = installmentsCount < 12;
+const ref12xCents = showRef12x
+  ? Math.round(installmentTotalCents / 12)
+  : 0;
 
-  const valueRows =
-    mode === "PARCELADO" && installmentsCount > 1
-      ? [
-          { label: "Valor total", value: moneyBRL(totalCents), strong: true },
-          { label: "Parcelas", value: `${installmentsCount}x` },
-          { label: "Valor por parcela", value: moneyBRL(perInstallmentCents), strong: true },
-          { label: "Referência em 12x", value: moneyBRL(ref12xCents) },
-        ]
-      : [
-          { label: "À vista", value: moneyBRL(avistaTotal), strong: true },
-          { label: "Referência em 12x", value: moneyBRL(ref12xCents) },
-        ];
+const valueRows = [
+  { label: "Valor bruto", value: moneyBRL(grossTotalCents) },
+  { label: "À vista", value: moneyBRL(cashTotalCents), strong: true },
+  { label: "Parcelado total", value: moneyBRL(installmentTotalCents), strong: true },
+  { label: "Parcelas", value: `${installmentsCount}x de ${moneyBRL(perInstallmentCents)}` },
+  ...(showRef12x
+    ? [{ label: "Referência em 12x", value: moneyBRL(ref12xCents) }]
+    : []),
+];
 
   const rowsTop = bottomY + 30;
   const rowsLeft = valX + 10;
