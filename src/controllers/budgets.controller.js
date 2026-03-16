@@ -235,6 +235,45 @@ function computeBudgetFromInputs({
   };
 }
 
+function buildCommercialSnapshot({
+  computed,
+  installmentsCount,
+}) {
+  const count = Math.max(1, Number(installmentsCount || 1));
+
+  // bruto comum do orçamento
+  // no cálculo atual, totalBeforeDiscount pode estar com cardFee embutida
+  // então removemos a taxa para chegar na base comum
+  const grossTotalCents = Math.max(
+    0,
+    Number(computed.totalBeforeDiscountCents || 0) - Number(computed.cardFeeCents || 0)
+  );
+
+  // à vista = bruto - desconto
+  const cashTotalCents = Math.max(
+    0,
+    grossTotalCents - Number(computed.discountCents || 0)
+  );
+
+  // parcelado = bruto + taxa
+  const installmentTotalCents = Math.max(
+    0,
+    grossTotalCents + Number(computed.cardFeeCents || 0)
+  );
+
+  const installmentAmountCents = Math.max(
+    0,
+    Math.round(installmentTotalCents / count)
+  );
+
+  return {
+    grossTotalCents,
+    cashTotalCents,
+    installmentTotalCents,
+    installmentAmountCents,
+  };
+}
+
 function normalizeExtras(raw) {
   const list = Array.isArray(raw) ? raw : [];
 
@@ -288,6 +327,12 @@ async function listBudgets(req, res) {
       subtotalCents: true,
       discountCents: true,
       totalCents: true,
+
+      grossTotalCents: true,
+      cashTotalCents: true,
+      installmentTotalCents: true,
+      installmentAmountCents: true,
+
       paymentMode: true,
       paymentMethod: true,
       installmentsCount: true,
@@ -506,6 +551,11 @@ async function createBudget(req, res) {
     discountCentsRaw: discCentsRaw.value,
   });
 
+  const commercial = buildCommercialSnapshot({
+    computed,
+    installmentsCount: count,
+  });
+
   // parcelas do orçamento
   let finalFirstDueDate = baseDue;
   let budgetInstallmentsData = [];
@@ -544,9 +594,14 @@ async function createBudget(req, res) {
       expectedDeliveryAt: exp,
       notes: notes ? String(notes).trim() : null,
 
-      subtotalCents: computed.totalBeforeDiscountCents,
+        subtotalCents: computed.totalBeforeDiscountCents,
       discountCents: computed.discountCents,
       totalCents: computed.totalCents,
+
+      grossTotalCents: commercial.grossTotalCents,
+      cashTotalCents: commercial.cashTotalCents,
+      installmentTotalCents: commercial.installmentTotalCents,
+      installmentAmountCents: commercial.installmentAmountCents,
 
       paymentMode: modeNorm,
       paymentMethod: methodNorm || null,
@@ -771,6 +826,11 @@ async function updateBudgetFull(req, res) {
     discountCentsRaw: discCentsRaw.value,
   });
 
+  const commercial = buildCommercialSnapshot({
+    computed,
+    installmentsCount: count,
+  });
+
   let finalFirstDueDate = baseDue;
   let budgetInstallmentsData = [];
 
@@ -812,6 +872,11 @@ async function updateBudgetFull(req, res) {
         subtotalCents: computed.totalBeforeDiscountCents,
         discountCents: computed.discountCents,
         totalCents: computed.totalCents,
+
+        grossTotalCents: commercial.grossTotalCents,
+        cashTotalCents: commercial.cashTotalCents,
+        installmentTotalCents: commercial.installmentTotalCents,
+        installmentAmountCents: commercial.installmentAmountCents,
 
         paymentMode: modeNorm,
         paymentMethod: methodNorm || null,
