@@ -43,6 +43,45 @@ function fmtBR(date) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
 }
 
+function clipPdfText(value, max = 28) {
+  const s = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return "—";
+  return s.length > max ? `${s.slice(0, max - 1).trim()}…` : s;
+}
+
+function orderStatusLabelPdf(status) {
+  const map = {
+    ORCAMENTO: "Orçamento",
+    PEDIDO: "Pedido",
+    EM_PRODUCAO: "Em produção",
+    PRONTO: "Pronto",
+    ENTREGUE: "Entregue",
+    CANCELADO: "Cancelado",
+  };
+  return map[String(status || "").toUpperCase()] || String(status || "—");
+}
+
+function paymentLabelPdf(paymentMode, paymentMethod) {
+  const modeMap = {
+    AVISTA: "À vista",
+    PARCELADO: "Parcelado",
+  };
+
+  const methodMap = {
+    PIX: "Pix",
+    CARTAO: "Cartão",
+    DINHEIRO: "Dinheiro",
+    BOLETO: "Boleto",
+    TRANSFERENCIA: "Transferência",
+    OUTRO: "Outro",
+  };
+
+  const mode = modeMap[String(paymentMode || "").toUpperCase()] || String(paymentMode || "");
+  const method = methodMap[String(paymentMethod || "").toUpperCase()] || String(paymentMethod || "");
+
+  return [mode, method].filter(Boolean).join(" / ") || "—";
+}
+
 async function sumLegacyAutoInAppointments({ salonId, from, to }) {
   const appts = await prisma.appointment.findMany({
     where: { salonId, status: "FINALIZADO", startAt: { gte: from, lt: to } },
@@ -719,8 +758,8 @@ async function reportSalesHistoryPdf(req, res) {
   doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Pedidos filtrados", margin, y);
   y += 10;
 
-  const cols = ["Criado em", "Cliente", "Status", "Entrega prevista", "Pagamento", "Valor"];
-  const colW = [72, 118, 78, 84, (pageW - margin * 2) - (72 + 118 + 78 + 84 + 90), 90];
+const cols = ["Criado", "Cliente", "Status", "Prev. entrega", "Pagamento", "Valor"];
+  const colW = [64, 150, 82, 78, 70, 86];
 
   let ty = drawTableHeader(doc, margin, y, cols, colW);
 
@@ -731,14 +770,14 @@ async function reportSalesHistoryPdf(req, res) {
       doc,
       margin,
       ty,
-      ["—", "—", "—", "—", "Nenhum pedido encontrado", moneyBRL(0)],
+      ["—", "—", "—", "—", "Nenhum pedido", moneyBRL(0)],
       colW,
-      18,
+      22,
       [5]
     );
   } else {
     for (const order of rows) {
-      ty = ensureSpace(doc, ty, 26, ctx, true);
+      ty = ensureSpace(doc, ty, 30, ctx, true);
 
       if (ty === 60) {
         drawHistoryMiniHeader();
@@ -746,23 +785,20 @@ async function reportSalesHistoryPdf(req, res) {
         ty = drawTableHeader(doc, margin, 98, cols, colW);
       }
 
-      const payment =
-        [order.paymentMode, order.paymentMethod].filter(Boolean).join(" • ") || "—";
-
       ty = drawTableRow(
         doc,
         margin,
         ty,
         [
           fmtBR(order.createdAt),
-          order.client?.name || "—",
-          order.status || "—",
+          clipPdfText(order.client?.name || "—", 26),
+          orderStatusLabelPdf(order.status),
           fmtBR(order.expectedDeliveryAt),
-          payment,
+          clipPdfText(paymentLabelPdf(order.paymentMode, order.paymentMethod), 16),
           moneyBRL(order.totalCents || 0),
         ],
         colW,
-        18,
+        22,
         [5]
       );
     }
