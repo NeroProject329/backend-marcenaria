@@ -755,11 +755,11 @@ async function reportSalesHistoryPdf(req, res) {
   // Tabela
   y = ensureSpace(doc, y, 110, ctx, false);
 
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Pedidos filtrados", margin, y);
-  y += 10;
+ doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Pedidos filtrados", margin, y);
+  y += 16;
 
-const cols = ["Criado", "Cliente", "Status", "Prev. entrega", "Pagamento", "Valor"];
-  const colW = [64, 150, 82, 78, 70, 86];
+  const cols = ["Criado", "Cliente", "Status", "Entrega", "Pgto", "Valor"];
+  const colW = [78, 141, 74, 82, 60, 80];
 
   let ty = drawTableHeader(doc, margin, y, cols, colW);
 
@@ -794,7 +794,7 @@ const cols = ["Criado", "Cliente", "Status", "Prev. entrega", "Pagamento", "Valo
           clipPdfText(order.client?.name || "—", 26),
           orderStatusLabelPdf(order.status),
           fmtBR(order.expectedDeliveryAt),
-          clipPdfText(paymentLabelPdf(order.paymentMode, order.paymentMethod), 16),
+          clipPdfText(paymentLabelPdf(order.paymentMode, order.paymentMethod), 13),
           moneyBRL(order.totalCents || 0),
         ],
         colW,
