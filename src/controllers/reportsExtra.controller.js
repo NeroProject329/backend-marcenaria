@@ -719,8 +719,8 @@ async function reportSalesHistoryPdf(req, res) {
   doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Pedidos filtrados", margin, y);
   y += 10;
 
-  const cols = ["Criado", "Cliente", "Status", "Prev. entrega", "Pagamento", "Valor"];
-  const colW = [64, 162, 74, 74, 61, 80];
+  const cols = ["Criado em", "Cliente", "Status", "Entrega prevista", "Pagamento", "Valor"];
+  const colW = [72, 118, 78, 84, (pageW - margin * 2) - (72 + 118 + 78 + 84 + 90), 90];
 
   let ty = drawTableHeader(doc, margin, y, cols, colW);
 
@@ -731,14 +731,14 @@ async function reportSalesHistoryPdf(req, res) {
       doc,
       margin,
       ty,
-      ["—", "—", "—", "—", "Nenhum pedido", moneyBRL(0)],
+      ["—", "—", "—", "—", "Nenhum pedido encontrado", moneyBRL(0)],
       colW,
-      22,
+      18,
       [5]
     );
   } else {
     for (const order of rows) {
-      ty = ensureSpace(doc, ty, 28, ctx, true);
+      ty = ensureSpace(doc, ty, 26, ctx, true);
 
       if (ty === 60) {
         drawHistoryMiniHeader();
@@ -746,20 +746,23 @@ async function reportSalesHistoryPdf(req, res) {
         ty = drawTableHeader(doc, margin, 98, cols, colW);
       }
 
+      const payment =
+        [order.paymentMode, order.paymentMethod].filter(Boolean).join(" • ") || "—";
+
       ty = drawTableRow(
         doc,
         margin,
         ty,
         [
-          pdfOneLine(fmtBR(order.createdAt)),
-          pdfOneLine(order.client?.name || "—"),
-          pdfOneLine(orderStatusLabelPdf(order.status)),
-          pdfOneLine(fmtBR(order.expectedDeliveryAt)),
-          pdfOneLine(paymentLabelPdf(order.paymentMode, order.paymentMethod)),
+          fmtBR(order.createdAt),
+          order.client?.name || "—",
+          order.status || "—",
+          fmtBR(order.expectedDeliveryAt),
+          payment,
           moneyBRL(order.totalCents || 0),
         ],
         colW,
-        22,
+        18,
         [5]
       );
     }
