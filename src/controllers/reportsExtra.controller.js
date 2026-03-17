@@ -82,6 +82,45 @@ function paymentLabelPdf(paymentMode, paymentMethod) {
   return [mode, method].filter(Boolean).join(" / ") || "—";
 }
 
+function clipPdfText(value, max = 28) {
+  const s = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return "—";
+  return s.length > max ? `${s.slice(0, max - 1).trim()}…` : s;
+}
+
+function orderStatusLabelPdf(status) {
+  const map = {
+    ORCAMENTO: "Orçamento",
+    PEDIDO: "Pedido",
+    EM_PRODUCAO: "Em produção",
+    PRONTO: "Pronto",
+    ENTREGUE: "Entregue",
+    CANCELADO: "Cancelado",
+  };
+  return map[String(status || "").toUpperCase()] || String(status || "—");
+}
+
+function paymentLabelPdf(paymentMode, paymentMethod) {
+  const modeMap = {
+    AVISTA: "À vista",
+    PARCELADO: "Parcelado",
+  };
+
+  const methodMap = {
+    PIX: "Pix",
+    CARTAO: "Cartão",
+    DINHEIRO: "Dinheiro",
+    BOLETO: "Boleto",
+    TRANSFERENCIA: "Transferência",
+    OUTRO: "Outro",
+  };
+
+  const mode = modeMap[String(paymentMode || "").toUpperCase()] || String(paymentMode || "");
+  const method = methodMap[String(paymentMethod || "").toUpperCase()] || String(paymentMethod || "");
+
+  return [mode, method].filter(Boolean).join(" / ") || "—";
+}
+
 async function sumLegacyAutoInAppointments({ salonId, from, to }) {
   const appts = await prisma.appointment.findMany({
     where: { salonId, status: "FINALIZADO", startAt: { gte: from, lt: to } },
@@ -418,19 +457,8 @@ async function getDeliveredSalesForPack({ salonId, month }) {
       status: "ENTREGUE",
       OR: [
         { deliveredAt: { gte: from, lt: to } },
-        {
-          AND: [
-            { deliveredAt: null },
-            { expectedDeliveryAt: { gte: from, lt: to } },
-          ],
-        },
-        {
-          AND: [
-            { deliveredAt: null },
-            { expectedDeliveryAt: null },
-            { createdAt: { gte: from, lt: to } },
-          ],
-        },
+        { expectedDeliveryAt: { gte: from, lt: to } },
+        { createdAt: { gte: from, lt: to } },
       ],
     },
     orderBy: { createdAt: "desc" },
@@ -1253,7 +1281,7 @@ async function reportPackPdf(req, res) {
   y = ensureSpace(doc, y, 150, ctx, false);
 
   doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Histórico de vendas entregues", margin, y);
-  y += 10;
+  y += 16;
 
   y = drawCardsRow(doc, y, [
     { title: "Qtd. entregues", value: String(pack.salesDelivered?.count || 0) },
@@ -1261,8 +1289,8 @@ async function reportPackPdf(req, res) {
     { title: "Filtro", value: "Status: ENTREGUE", foot: `Período: ${month}` },
   ]);
 
-  const salesCols = ["Data", "Cliente", "Status", "Entrega", "Pagamento", "Valor"];
-  const salesW = [62, 120, 76, 70, (pageW - margin * 2) - (62 + 120 + 76 + 70 + 90), 90];
+  const salesCols = ["Criado", "Cliente", "Status", "Entrega", "Pgto", "Valor"];
+  const salesW = [78, 141, 74, 82, 60, 80];
 
   let sy = y;
   sy = drawTableHeader(doc, margin, sy, salesCols, salesW);
@@ -1274,25 +1302,21 @@ async function reportPackPdf(req, res) {
       doc,
       margin,
       sy,
-      ["—", "—", "—", "—", "Nenhuma venda entregue no período", moneyBRL(0)],
+      ["—", "—", "—", "—", "Nenhuma venda", moneyBRL(0)],
       salesW,
-      18,
+      22,
       [5]
     );
   } else {
     for (const sale of salesItems) {
-      sy = ensureSpace(doc, sy, 26, ctx, true);
+      sy = ensureSpace(doc, sy, 30, ctx, true);
+
       if (sy === 60) {
         doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Histórico de vendas entregues", margin, 74);
         sy = drawTableHeader(doc, margin, 98, salesCols, salesW);
       }
 
-      const paymentLabel =
-        [sale.paymentMode, sale.paymentMethod]
-          .filter(Boolean)
-          .join(" • ") || "—";
-
-      const deliveryDate = sale.deliveredAt || sale.expectedDeliveryAt || null;
+      const deliveryDate = sale.deliveredAt || sale.expectedDeliveryAt || sale.createdAt || null;
 
       sy = drawTableRow(
         doc,
@@ -1300,14 +1324,14 @@ async function reportPackPdf(req, res) {
         sy,
         [
           fmtBR(sale.createdAt),
-          sale.client?.name || "—",
-          sale.status || "—",
+          clipPdfText(sale.client?.name || "—", 26),
+          orderStatusLabelPdf(sale.status),
           fmtBR(deliveryDate),
-          paymentLabel,
+          clipPdfText(paymentLabelPdf(sale.paymentMode, sale.paymentMethod), 13),
           moneyBRL(sale.totalCents || 0),
         ],
         salesW,
-        18,
+        22,
         [5]
       );
     }
