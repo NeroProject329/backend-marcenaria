@@ -1,5 +1,5 @@
 // src/controllers/auth.controller.js
-const bcrypt = require("bcryptjs"); // ou "bcrypt"
+const bcrypt = require("bcrypt"); // ou "bcrypt"
 const { OAuth2Client } = require("google-auth-library");
 const { prisma } = require("../lib/prisma");
 const jwt = require("jsonwebtoken");
