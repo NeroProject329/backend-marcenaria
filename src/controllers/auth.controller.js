@@ -1,4 +1,5 @@
 // src/controllers/auth.controller.js
+const bcrypt = require("bcryptjs"); // ou "bcrypt"
 const { OAuth2Client } = require("google-auth-library");
 const { prisma } = require("../lib/prisma");
 const jwt = require("jsonwebtoken");
@@ -226,10 +227,14 @@ async function login(req, res) {
       include: { salon: true },
     });
 
-    if (!user) return res.status(401).json({ message: "Credenciais inválidas" });
+    if (!user.password) {
+  return res.status(401).json({
+    message: "Essa conta foi criada com Google. Entre com Google para continuar.",
+  });
+}
 
-    const ok = await bcrypt.compare(password, user.password);
-    if (!ok) return res.status(401).json({ message: "Credenciais inválidas" });
+const ok = await bcrypt.compare(password, user.password);
+if (!ok) return res.status(401).json({ message: "Credenciais inválidas" });
 
     if (!user.salon) return res.status(403).json({ message: "Conta sem salão vinculado" });
 
