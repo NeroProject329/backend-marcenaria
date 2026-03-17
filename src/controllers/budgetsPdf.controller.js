@@ -355,13 +355,13 @@ async function budgetPdf(req, res) {
   doc.text("Quantidade", xQty, tableY + 7, { width: cols.qty - 6, align: "right" });
   doc.text("Total do item", xTotal, tableY + 7, { width: cols.total - 6, align: "right" });
 
-  let y = tableY + 28;
-  const rowH = 19;
+ let y = tableY + 28;
+const rowH = 19;
 
-  const reserveBottom = 170;
-  const maxTableY = pageBottom - reserveBottom;
+const reserveBottom = 205;
+const maxTableY = pageBottom - reserveBottom;
 
-  const items = Array.isArray(budget.items) ? budget.items : [];
+const items = Array.isArray(budget.items) ? budget.items : [];
 
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
@@ -403,14 +403,14 @@ async function budgetPdf(req, res) {
 
   const bottomY = Math.max(y + 14, maxTableY + 10);
 
-  const obsW = 330;
-  const valW = 175;
-  const gap2 = 10;
+const obsW = 294;
+const valW = 195;
+const gap2 = 10;
 
-  const obsX = x0 + 8;
-  const valX = obsX + obsW + gap2;
+const obsX = x0 + 8;
+const valX = obsX + obsW + gap2;
 
-  const bottomH = pageBottom - bottomY - 18;
+const bottomH = pageBottom - bottomY - 18;
 
   doc.roundedRect(obsX, bottomY, obsW, bottomH, 8).fillAndStroke("#ffffff", BORDER);
   doc.fillColor(TEXT).font("Helvetica-Bold").fontSize(11).text("Observações", obsX + 12, bottomY + 12);
@@ -479,41 +479,44 @@ const valueRows = [
     : []),
 ];
 
-  const rowsTop = bottomY + 30;
-  const rowsLeft = valX + 10;
-  const rowsWidth = valW - 20;
-  const rowHeight = 28;
+const rowsTop = bottomY + 30;
+const rowsLeft = valX + 10;
+const rowsWidth = valW - 20;
+const rowHeight = 28;
 
-  valueRows.forEach((row, idx) => {
-    const yy = rowsTop + idx * rowHeight;
+const labelWidth = 86;
+const valueWidth = rowsWidth - labelWidth;
 
-    if (idx > 0) {
-      doc
-        .strokeColor("#eef2f7")
-        .lineWidth(0.8)
-        .moveTo(rowsLeft, yy - 6)
-        .lineTo(rowsLeft + rowsWidth, yy - 6)
-        .stroke();
-    }
+valueRows.forEach((row, idx) => {
+  const yy = rowsTop + idx * rowHeight;
 
+  if (idx > 0) {
     doc
-      .fillColor(TEXT)
-      .font("Helvetica")
-      .fontSize(9)
-      .text(`${row.label}:`, rowsLeft, yy, {
-        width: rowsWidth * 0.54,
-        align: "left",
-      });
+      .strokeColor("#eef2f7")
+      .lineWidth(0.8)
+      .moveTo(rowsLeft, yy - 6)
+      .lineTo(rowsLeft + rowsWidth, yy - 6)
+      .stroke();
+  }
 
-    doc
-      .fillColor(TEXT)
-      .font(row.strong ? "Helvetica-Bold" : "Helvetica-Bold")
-      .fontSize(row.strong ? 10 : 9)
-      .text(String(row.value || "—"), rowsLeft + rowsWidth * 0.46, yy, {
-        width: rowsWidth * 0.54,
-        align: "right",
-      });
-  });
+  doc
+    .fillColor(TEXT)
+    .font("Helvetica")
+    .fontSize(9)
+    .text(`${row.label}:`, rowsLeft, yy, {
+      width: labelWidth,
+      align: "left",
+    });
+
+  doc
+    .fillColor(TEXT)
+    .font("Helvetica-Bold")
+    .fontSize(row.strong ? 10 : 9)
+    .text(String(row.value || "—"), rowsLeft + labelWidth, yy, {
+      width: valueWidth,
+      align: "right",
+    });
+});
 
   const footerY = pageBottom - 10;
   doc.fillColor(MUTED).font("Helvetica").fontSize(8);
