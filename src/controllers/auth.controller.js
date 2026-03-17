@@ -1,10 +1,102 @@
 // src/controllers/auth.controller.js
-const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
+const { OAuth2Client } = require("google-auth-library");
 const { prisma } = require("../lib/prisma");
+const jwt = require("jsonwebtoken");
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 function signToken({ userId, salonId }) {
   return jwt.sign({ userId, salonId }, process.env.JWT_SECRET, { expiresIn: "7d" });
+}
+
+async function googleAuth(req, res) {
+  try {
+    const { credential, salonName } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({ message: "Credential do Google não enviada." });
+    }
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+
+    if (!payload?.sub || !payload?.email) {
+      return res.status(400).json({ message: "Token do Google inválido." });
+    }
+
+    const googleSub = payload.sub;
+    const email = String(payload.email).trim().toLowerCase();
+    const name = payload.name || email.split("@")[0];
+    const avatarUrl = payload.picture || null;
+
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { googleSub },
+          { email },
+        ],
+      },
+      include: { salon: true },
+    });
+
+    if (!user) {
+      if (!salonName || !String(salonName).trim()) {
+        return res.status(409).json({
+          code: "SALON_NAME_REQUIRED",
+          message: "Informe o nome da marcenaria para concluir o cadastro.",
+        });
+      }
+
+      user = await prisma.user.create({
+        data: {
+          name,
+          email,
+          password: null,
+          googleSub,
+          avatarUrl,
+          salon: {
+            create: {
+              name: String(salonName).trim(),
+            },
+          },
+        },
+        include: { salon: true },
+      });
+    } else {
+      const updateData = {};
+
+      if (!user.googleSub) updateData.googleSub = googleSub;
+      if (!user.avatarUrl && avatarUrl) updateData.avatarUrl = avatarUrl;
+      if (!user.name && name) updateData.name = name;
+
+      if (Object.keys(updateData).length) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: updateData,
+          include: { salon: true },
+        });
+      }
+    }
+
+    if (!user.salon) {
+      return res.status(403).json({ message: "Conta sem marcenaria vinculada." });
+    }
+
+    const token = signToken({ userId: user.id, salonId: user.salon.id });
+
+    return res.json({
+      token,
+      user: { id: user.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl || null },
+      salon: { id: user.salon.id, name: user.salon.name },
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: "Erro ao autenticar com Google." });
+  }
 }
 
 function daysLeft(endsAt) {

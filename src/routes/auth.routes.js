@@ -5,5 +5,6 @@ const { requireAuth } = require("../middlewares/auth.middleware");
 router.post("/register", register);
 router.post("/login", login);
 router.get("/me", requireAuth, me);
+router.post("/google", googleAuth);
 
 module.exports = router;
