@@ -957,6 +957,30 @@ function drawKeyValueRows(doc, x, y, w, rows) {
   return y + rows.length * rowH;
 }
 
+function drawKeyValueRowsCompact(doc, x, y, w, rows, opts = {}) {
+  const rowH = opts.rowH || 18;
+  const valueW = opts.valueW || 122;
+  const gap = opts.gap || 8;
+  const labelW = Math.max(60, w - valueW - gap);
+
+  rows.forEach((r, idx) => {
+    const yy = y + idx * rowH;
+
+    doc.fillColor("#0f172a").font("Helvetica").fontSize(10);
+    textEllipsis(doc, r.label, x, yy, labelW);
+
+    doc.fillColor("#0f172a").font(r.bold ? "Helvetica-Bold" : "Helvetica").fontSize(10);
+    doc.text(r.value, x + labelW + gap, yy, {
+      width: valueW,
+      align: "right",
+      lineBreak: false,
+      ellipsis: true,
+    });
+  });
+
+  return y + rows.length * rowH;
+}
+
 function drawTableHeader(doc, x, y, cols, colW) {
   doc.rect(x, y, colW.reduce((a, b) => a + b, 0), 22).fill("#f8fafc");
   doc.strokeColor("#e6eaf2").lineWidth(1).rect(x, y, colW.reduce((a, b) => a + b, 0), 22).stroke();
@@ -1133,7 +1157,7 @@ async function reportPackPdf(req, res) {
   // ===== DRE (dentro de box com altura fixa e espaçamento correto) =====
   y = ensureSpace(doc, y, 210, ctx, false);
 
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("DRE (Demonstrativo de Resultado)", margin, y);
+doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("DRE • Demonstrativo de resultado", margin, y);
   y += 14;
 
   const dreBoxH = 150;
@@ -1150,41 +1174,42 @@ async function reportPackPdf(req, res) {
 
   y = y + dreBoxH + 18;
 
-  // ===== DFC (2 boxes alinhados) =====
-  y = ensureSpace(doc, y, 160, ctx, false);
 
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("DFC (Fluxo de Caixa)", margin, y);
-  y += 14;
+  // ===== Fluxo de caixa (DFC) =====
+  y = ensureSpace(doc, y, 174, ctx, false);
+
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("Fluxo de caixa (DFC)", margin, y);
+  y += 16;
 
   const gap = 10;
   const boxW = (pageW - margin * 2 - gap) / 2;
-  const boxH = 105;
+  const boxH = 112;
 
   const real = pack.dfc.real;
   const proj = pack.dfc.projected;
 
-  const b1 = sectionBox(doc, margin, y, boxW, boxH, "Real (paidAt)");
-  drawKeyValueRows(doc, b1.x, b1.y, b1.w, [
+  const b1 = sectionBox(doc, margin, y, boxW, boxH, "Realizado (paidAt)");
+  drawKeyValueRowsCompact(doc, b1.x, b1.y, b1.w, [
     { label: "Saldo inicial", value: moneyBRL(real.initialBalanceCents) },
     { label: "Entradas", value: moneyBRL(real.inCents) },
     { label: "Saídas", value: moneyBRL(real.outCents) },
     { label: "Saldo final", value: moneyBRL(real.finalBalanceCents), bold: true },
-  ]);
+  ], { valueW: 122, rowH: 18, gap: 8 });
 
   const b2 = sectionBox(doc, margin + boxW + gap, y, boxW, boxH, "Projetado (dueDate)");
-  drawKeyValueRows(doc, b2.x, b2.y, b2.w, [
+  drawKeyValueRowsCompact(doc, b2.x, b2.y, b2.w, [
     { label: "Saldo inicial", value: moneyBRL(proj.initialBalanceCents) },
     { label: "Entradas", value: moneyBRL(proj.inCents) },
     { label: "Saídas", value: moneyBRL(proj.outCents) },
     { label: "Saldo final", value: moneyBRL(proj.finalBalanceCents), bold: true },
-  ]);
+  ], { valueW: 122, rowH: 18, gap: 8 });
 
   y = y + boxH + 18;
 
   // ===== Próximos vencimentos (tabela dentro de box) =====
   y = ensureSpace(doc, y, 140, ctx, false);
 
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Próximos vencimentos (resumo)", margin, y);
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Próximos vencimentos", margin, y);
   y += 12;
 
   const upBoxH = 98;
@@ -1203,7 +1228,7 @@ async function reportPackPdf(req, res) {
   // ===== Movimentos vencidos (tabela paginada, nada “solto”) =====
   y = ensureSpace(doc, y, 120, ctx, false);
 
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Movimentos vencidos (em aberto)", margin, y);
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Vencidos em aberto", margin, y);
   y += 10;
 
   const overdueCols = ["Venc.", "Tipo", "Descrição", "Valor"];
@@ -1242,7 +1267,7 @@ async function reportPackPdf(req, res) {
   // ===== Últimas transações (tabela paginada) =====
   y = ensureSpace(doc, y, 110, ctx, false);
 
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Últimas transações do período", margin, y);
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Últimas transações", margin, y);
   y += 10;
 
   const txCols = ["Data", "Origem", "Nome", "Valor"];
@@ -1280,7 +1305,7 @@ async function reportPackPdf(req, res) {
   // ===== Histórico de vendas entregues (resumo + tabela paginada) =====
   y = ensureSpace(doc, y, 150, ctx, false);
 
-  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Histórico de vendas entregues", margin, y);
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Vendas entregues", margin, y);
   y += 16;
 
   y = drawCardsRow(doc, y, [
