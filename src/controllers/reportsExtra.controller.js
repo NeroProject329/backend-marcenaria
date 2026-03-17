@@ -363,8 +363,153 @@ async function getLastTransactions({ salonId, from, to, take = 15 }) {
 
   return merged.slice(0, take);
 }
+async function getDeliveredSalesForPack({ salonId, month }) {
+  const range = monthRange(month);
+  if (!range) {
+    const err = new Error("month inválido. Use YYYY-MM");
+    err.status = 400;
+    throw err;
+  }
+
+  const { from, to } = range;
+
+  const rows = await prisma.order.findMany({
+    where: {
+      salonId,
+      status: "ENTREGUE",
+      OR: [
+        { deliveredAt: { gte: from, lt: to } },
+        {
+          AND: [
+            { deliveredAt: null },
+            { expectedDeliveryAt: { gte: from, lt: to } },
+          ],
+        },
+        {
+          AND: [
+            { deliveredAt: null },
+            { expectedDeliveryAt: null },
+            { createdAt: { gte: from, lt: to } },
+          ],
+        },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      status: true,
+      createdAt: true,
+      expectedDeliveryAt: true,
+      deliveredAt: true,
+      totalCents: true,
+      paymentMode: true,
+      paymentMethod: true,
+      client: { select: { name: true } },
+    },
+  });
+
+  const sorted = [...rows].sort((a, b) => {
+    const aDate = parseISO(a.deliveredAt) || parseISO(a.createdAt) || new Date(0);
+    const bDate = parseISO(b.deliveredAt) || parseISO(b.createdAt) || new Date(0);
+    return bDate - aDate;
+  });
+
+  return {
+    count: sorted.length,
+    totalCents: sorted.reduce((acc, row) => acc + (Number(row.totalCents) || 0), 0),
+    rows: sorted,
+  };
+}
+
+
+  const SALES_HISTORY_STATUS = new Set([
+  "ALL",
+  "ORCAMENTO",
+  "PEDIDO",
+  "EM_PRODUCAO",
+  "PRONTO",
+  "ENTREGUE",
+  "CANCELADO",
+]);
+
+function normalizeSalesHistoryStatus(v) {
+  const s = String(v || "ALL").trim().toUpperCase();
+  return SALES_HISTORY_STATUS.has(s) ? s : null;
+}
+
+function yearMonthInSaoPaulo(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(d);
+
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+
+  return year && month ? `${year}-${month}` : null;
+}
+
+function isInMonthSalesHistory(value, month) {
+  if (!value || !month) return false;
+  return yearMonthInSaoPaulo(value) === month;
+}
+
+async function getSalesHistoryRows({ salonId, month, status }) {
+  const range = monthRange(month);
+  if (!range) {
+    const err = new Error("month inválido. Use YYYY-MM");
+    err.status = 400;
+    throw err;
+  }
+
+  const statusNorm = normalizeSalesHistoryStatus(status);
+  if (!statusNorm) {
+    const err = new Error("status inválido.");
+    err.status = 400;
+    throw err;
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { salonId },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      status: true,
+      createdAt: true,
+      expectedDeliveryAt: true,
+      deliveredAt: true,
+      totalCents: true,
+      paymentMode: true,
+      paymentMethod: true,
+      client: { select: { name: true } },
+    },
+  });
+
+  const filtered = rows
+    .filter((order) => {
+      return (
+        isInMonthSalesHistory(order.createdAt, month) ||
+        isInMonthSalesHistory(order.expectedDeliveryAt || null, month)
+      );
+    })
+    .filter((order) => (statusNorm === "ALL" ? true : order.status === statusNorm))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  return {
+    count: filtered.length,
+    totalCents: filtered.reduce((acc, order) => acc + (Number(order.totalCents) || 0), 0),
+    rows: filtered,
+    appliedStatus: statusNorm,
+  };
+}
 
 async function buildPack({ salonId, month, basis }) {
+
   const range = monthRange(month);
   if (!range) {
     const err = new Error("month inválido. Use YYYY-MM");
@@ -450,6 +595,8 @@ async function buildPack({ salonId, month, basis }) {
   // Últimas transações do mês
   const lastTransactions = await getLastTransactions({ salonId, from, to, take: 18 });
 
+  const salesDelivered = await getDeliveredSalesForPack({ salonId, month });
+
   return {
     meta: {
       month,
@@ -460,10 +607,177 @@ async function buildPack({ salonId, month, basis }) {
     summary,
     dre,
     dfc,
-    upcoming: { d7: next7, d15: next15, d30: next30 },
+     upcoming: { d7: next7, d15: next15, d30: next30 },
     overdue,
     lastTransactions,
+    salesDelivered,
   };
+}
+
+async function reportSalesHistoryPdf(req, res) {
+  const { salonId } = req.user;
+
+  const month = String(req.query.month || "").trim();
+  const statusRaw = String(req.query.status || "ALL").trim().toUpperCase();
+  const status = normalizeSalesHistoryStatus(statusRaw);
+
+  if (!status) {
+    return res.status(400).json({ message: "status inválido." });
+  }
+
+  let data;
+  try {
+    data = await getSalesHistoryRows({ salonId, month, status });
+  } catch (e) {
+    const code = e.status || 500;
+    return res.status(code).json({ message: e.message || "Erro ao gerar PDF do histórico." });
+  }
+
+  const statusLabelMap = {
+    ALL: "Todos",
+    ORCAMENTO: "Orçamento",
+    PEDIDO: "Pedido",
+    EM_PRODUCAO: "Em produção",
+    PRONTO: "Pronto",
+    ENTREGUE: "Entregue",
+    CANCELADO: "Cancelado",
+  };
+
+  const statusLabel = statusLabelMap[data.appliedStatus] || data.appliedStatus;
+  const filenameStatus = data.appliedStatus === "ALL" ? "TODOS" : data.appliedStatus;
+  const filename = `Historico_Vendas_${month}_${filenameStatus}.pdf`;
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+  const doc = new PDFDocument({ size: "A4", margin: 40 });
+  doc.pipe(res);
+
+  const pageW = doc.page.width;
+  const margin = doc.page.margins.left;
+  const ctx = { month, basisLabel: "Histórico de vendas" };
+
+  function drawHistoryMiniHeader() {
+    doc.rect(0, 0, pageW, 46).fill("#0b1220");
+    doc
+      .fillColor("#ffffff")
+      .font("Helvetica-Bold")
+      .fontSize(12)
+      .text(`Histórico de vendas • ${month}`, margin, 14, { width: pageW - margin * 2 });
+
+    doc
+      .fillColor("#cbd5e1")
+      .font("Helvetica")
+      .fontSize(9)
+      .text(`Filtro: ${statusLabel}`, margin, 30, { width: pageW - margin * 2 });
+
+    return 60;
+  }
+
+  // Header principal
+  doc.rect(0, 0, pageW, 92).fill("#0866ff");
+  doc
+    .fillColor("#ffffff")
+    .font("Helvetica-Bold")
+    .fontSize(20)
+    .text("Histórico de vendas", margin, 28, { width: pageW - margin * 2 });
+
+  doc
+    .fillColor("#dbeafe")
+    .font("Helvetica")
+    .fontSize(11)
+    .text(`Período: ${month} • Filtro: ${statusLabel}`, margin, 58, {
+      width: pageW - margin * 2,
+    });
+
+  doc.fillColor("#0f172a");
+  let y = 110;
+
+  // Resumo
+  y = ensureSpace(doc, y, 120, ctx, false);
+
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(14).text("Resumo do histórico", margin, y);
+  y += 16;
+
+  doc
+    .fillColor("#64748b")
+    .font("Helvetica")
+    .fontSize(10)
+    .text("Esse PDF reflete exatamente o filtro aplicado na aba Histórico de vendas.", margin, y);
+
+  y += 16;
+
+  y = drawCardsRow(doc, y, [
+    { title: "Registros", value: String(data.count || 0) },
+    { title: "Total visível", value: moneyBRL(data.totalCents || 0) },
+    { title: "Status aplicado", value: statusLabel, foot: `Período: ${month}` },
+  ]);
+
+  // Tabela
+  y = ensureSpace(doc, y, 110, ctx, false);
+
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Pedidos filtrados", margin, y);
+  y += 10;
+
+  const cols = ["Criado em", "Cliente", "Status", "Entrega prevista", "Pagamento", "Valor"];
+  const colW = [72, 118, 78, 84, (pageW - margin * 2) - (72 + 118 + 78 + 84 + 90), 90];
+
+  let ty = drawTableHeader(doc, margin, y, cols, colW);
+
+  const rows = (data.rows || []).slice(0, 200);
+
+  if (!rows.length) {
+    ty = drawTableRow(
+      doc,
+      margin,
+      ty,
+      ["—", "—", "—", "—", "Nenhum pedido encontrado", moneyBRL(0)],
+      colW,
+      18,
+      [5]
+    );
+  } else {
+    for (const order of rows) {
+      ty = ensureSpace(doc, ty, 26, ctx, true);
+
+      if (ty === 60) {
+        drawHistoryMiniHeader();
+        doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Pedidos filtrados", margin, 74);
+        ty = drawTableHeader(doc, margin, 98, cols, colW);
+      }
+
+      const payment =
+        [order.paymentMode, order.paymentMethod].filter(Boolean).join(" • ") || "—";
+
+      ty = drawTableRow(
+        doc,
+        margin,
+        ty,
+        [
+          fmtBR(order.createdAt),
+          order.client?.name || "—",
+          order.status || "—",
+          fmtBR(order.expectedDeliveryAt),
+          payment,
+          moneyBRL(order.totalCents || 0),
+        ],
+        colW,
+        18,
+        [5]
+      );
+    }
+  }
+
+  // Footer
+  const footerY = doc.page.height - doc.page.margins.bottom - 12;
+  doc.fillColor("#94a3b8").font("Helvetica").fontSize(9).text(
+    `Gerado em ${fmtBR(new Date())} • Marcenaria SaaS`,
+    margin,
+    footerY,
+    { width: pageW - margin * 2, align: "center" }
+  );
+
+  doc.end();
 }
 
 // --------------------
@@ -647,8 +961,8 @@ async function reportPackPdf(req, res) {
   // Header principal
   doc.rect(0, 0, pageW, 92).fill("#0866ff");
   doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(20).text("Relatório Financeiro", margin, 28, { width: pageW - margin * 2 });
-  doc.fillColor("#dbeafe").font("Helvetica").fontSize(11).text(
-    `Período: ${month} • Base DRE: ${basisLabel}`,
+    doc.fillColor("#dbeafe").font("Helvetica").fontSize(11).text(
+    `Período: ${month} • Base DRE: ${basisLabel} • Inclui vendas entregues`,
     margin,
     58,
     { width: pageW - margin * 2 }
@@ -793,7 +1107,7 @@ async function reportPackPdf(req, res) {
   py = drawTableHeader(doc, margin, py, txCols, txW);
 
   const txItems = (pack.lastTransactions || []).slice(0, 30);
-  if (!txItems.length) {
+   if (!txItems.length) {
     py = drawTableRow(doc, margin, py, ["—", "—", "Sem transações no período", moneyBRL(0)], txW, 18, [3]);
   } else {
     for (const t of txItems) {
@@ -816,6 +1130,74 @@ async function reportPackPdf(req, res) {
     }
   }
 
+  y = py + 18;
+
+  // ===== Histórico de vendas entregues (resumo + tabela paginada) =====
+  y = ensureSpace(doc, y, 150, ctx, false);
+
+  doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Histórico de vendas entregues", margin, y);
+  y += 10;
+
+  y = drawCardsRow(doc, y, [
+    { title: "Qtd. entregues", value: String(pack.salesDelivered?.count || 0) },
+    { title: "Total vendido", value: moneyBRL(pack.salesDelivered?.totalCents || 0) },
+    { title: "Filtro", value: "Status: ENTREGUE", foot: `Período: ${month}` },
+  ]);
+
+  const salesCols = ["Data", "Cliente", "Status", "Entrega", "Pagamento", "Valor"];
+  const salesW = [62, 120, 76, 70, (pageW - margin * 2) - (62 + 120 + 76 + 70 + 90), 90];
+
+  let sy = y;
+  sy = drawTableHeader(doc, margin, sy, salesCols, salesW);
+
+  const salesItems = (pack.salesDelivered?.rows || []).slice(0, 40);
+
+  if (!salesItems.length) {
+    sy = drawTableRow(
+      doc,
+      margin,
+      sy,
+      ["—", "—", "—", "—", "Nenhuma venda entregue no período", moneyBRL(0)],
+      salesW,
+      18,
+      [5]
+    );
+  } else {
+    for (const sale of salesItems) {
+      sy = ensureSpace(doc, sy, 26, ctx, true);
+      if (sy === 60) {
+        doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Histórico de vendas entregues", margin, 74);
+        sy = drawTableHeader(doc, margin, 98, salesCols, salesW);
+      }
+
+      const paymentLabel =
+        [sale.paymentMode, sale.paymentMethod]
+          .filter(Boolean)
+          .join(" • ") || "—";
+
+      const deliveryDate = sale.deliveredAt || sale.expectedDeliveryAt || null;
+
+      sy = drawTableRow(
+        doc,
+        margin,
+        sy,
+        [
+          fmtBR(sale.createdAt),
+          sale.client?.name || "—",
+          sale.status || "—",
+          fmtBR(deliveryDate),
+          paymentLabel,
+          moneyBRL(sale.totalCents || 0),
+        ],
+        salesW,
+        18,
+        [5]
+      );
+    }
+  }
+
+  y = sy + 18;
+
   // Footer
   const footerY = doc.page.height - doc.page.margins.bottom - 12;
   doc.fillColor("#94a3b8").font("Helvetica").fontSize(9).text(
@@ -831,4 +1213,5 @@ async function reportPackPdf(req, res) {
 module.exports = {
   reportPack,
   reportPackPdf,
+  reportSalesHistoryPdf,
 };
