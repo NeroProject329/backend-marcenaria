@@ -283,4 +283,4 @@ async function me(req, res) {
   return res.json({ user, subscription });
 }
 
-module.exports = { register, login, me };
+module.exports = { register, login, me ,  googleAuth};

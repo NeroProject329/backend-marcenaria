@@ -1,5 +1,5 @@
 const router = require("express").Router();
-const { register, login, me } = require("../controllers/auth.controller");
+const { register, login, me, googleAuth } = require("../controllers/auth.controller");
 const { requireAuth } = require("../middlewares/auth.middleware");
 
 router.post("/register", register);
