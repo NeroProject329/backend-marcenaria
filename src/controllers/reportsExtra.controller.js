@@ -719,26 +719,25 @@ async function reportSalesHistoryPdf(req, res) {
   doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(13).text("Pedidos filtrados", margin, y);
   y += 10;
 
-  const cols = ["Criado em", "Cliente", "Status", "Entrega prevista", "Pagamento", "Valor"];
-  const colW = [72, 118, 78, 84, (pageW - margin * 2) - (72 + 118 + 78 + 84 + 90), 90];
+  const cols = ["Criado", "Cliente", "Status", "Prev. entrega", "Pagamento", "Valor"];
+  const colW = [64, 150, 78, 78, 65, 80];
 
   let ty = drawTableHeader(doc, margin, y, cols, colW);
 
   const rows = (data.rows || []).slice(0, 200);
 
   if (!rows.length) {
-    ty = drawTableRow(
+    ty = drawTableRowAuto(
       doc,
       margin,
       ty,
       ["—", "—", "—", "—", "Nenhum pedido encontrado", moneyBRL(0)],
       colW,
-      18,
-      [5]
+      { rightAlignIdx: [5], fontSize: 9, minRowH: 22 }
     );
   } else {
     for (const order of rows) {
-      ty = ensureSpace(doc, ty, 26, ctx, true);
+      ty = ensureSpace(doc, ty, 52, ctx, true);
 
       if (ty === 60) {
         drawHistoryMiniHeader();
@@ -746,24 +745,20 @@ async function reportSalesHistoryPdf(req, res) {
         ty = drawTableHeader(doc, margin, 98, cols, colW);
       }
 
-      const payment =
-        [order.paymentMode, order.paymentMethod].filter(Boolean).join(" • ") || "—";
-
-      ty = drawTableRow(
+      ty = drawTableRowAuto(
         doc,
         margin,
         ty,
         [
           fmtBR(order.createdAt),
           order.client?.name || "—",
-          order.status || "—",
+          orderStatusLabelPdf(order.status),
           fmtBR(order.expectedDeliveryAt),
-          payment,
+          paymentLabelPdf(order.paymentMode, order.paymentMethod),
           moneyBRL(order.totalCents || 0),
         ],
         colW,
-        18,
-        [5]
+        { rightAlignIdx: [5], fontSize: 9, minRowH: 22 }
       );
     }
   }
@@ -910,6 +905,87 @@ function drawTableHeader(doc, x, y, cols, colW) {
 }
 
 function drawTableRow(doc, x, y, cells, colW, rowH = 18, rightAlignIdx = []) {
+
+  function orderStatusLabelPdf(status) {
+  const map = {
+    ORCAMENTO: "Orçamento",
+    PEDIDO: "Pedido",
+    EM_PRODUCAO: "Em produção",
+    PRONTO: "Pronto",
+    ENTREGUE: "Entregue",
+    CANCELADO: "Cancelado",
+  };
+  return map[String(status || "").toUpperCase()] || String(status || "—");
+}
+
+function paymentLabelPdf(paymentMode, paymentMethod) {
+  const modeMap = {
+    AVISTA: "À vista",
+    PARCELADO: "Parcelado",
+  };
+
+  const methodMap = {
+    PIX: "Pix",
+    CARTAO: "Cartão",
+    DINHEIRO: "Dinheiro",
+    BOLETO: "Boleto",
+    TRANSFERENCIA: "Transferência",
+    OUTRO: "Outro",
+  };
+
+  const mode = modeMap[String(paymentMode || "").toUpperCase()] || String(paymentMode || "");
+  const method = methodMap[String(paymentMethod || "").toUpperCase()] || String(paymentMethod || "");
+
+  return [mode, method].filter(Boolean).join(" / ") || "—";
+}
+
+function drawTableRowAuto(doc, x, y, cells, colW, opts = {}) {
+  const rightAlignIdx = opts.rightAlignIdx || [];
+  const fontSize = opts.fontSize || 9;
+  const minRowH = opts.minRowH || 22;
+  const padX = opts.padX || 8;
+  const padY = opts.padY || 5;
+
+  doc.font("Helvetica").fontSize(fontSize);
+
+  const heights = cells.map((txt, i) => {
+    const w = colW[i];
+    return doc.heightOfString(String(txt ?? ""), {
+      width: w - padX * 2,
+      align: rightAlignIdx.includes(i) ? "right" : "left",
+      lineGap: 1,
+    });
+  });
+
+  const contentH = Math.max(...heights, fontSize + 2);
+  const rowH = Math.max(minRowH, contentH + padY * 2);
+
+  doc
+    .strokeColor("#eef2f7")
+    .lineWidth(1)
+    .moveTo(x, y + rowH)
+    .lineTo(x + colW.reduce((a, b) => a + b, 0), y + rowH)
+    .stroke();
+
+  doc.fillColor("#0f172a").font("Helvetica").fontSize(fontSize);
+
+  let xx = x;
+  cells.forEach((txt, i) => {
+    const w = colW[i];
+    const isRight = rightAlignIdx.includes(i);
+
+    doc.text(String(txt ?? ""), xx + padX, y + padY, {
+      width: w - padX * 2,
+      align: isRight ? "right" : "left",
+      lineGap: 1,
+    });
+
+    xx += w;
+  });
+
+  return y + rowH;
+}
+
   doc.strokeColor("#eef2f7").lineWidth(1).moveTo(x, y + rowH).lineTo(x + colW.reduce((a, b) => a + b, 0), y + rowH).stroke();
 
   doc.fillColor("#0f172a").font("Helvetica").fontSize(10);
