@@ -117,7 +117,12 @@ app.use("/api", async (req, res, next) => {
 });
 
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/health", (req, res) =>
+  res.json({
+    ok: true,
+    release: "2026-10-27-material-pricing-receipts",
+  })
+);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/services", servicesRoutes);

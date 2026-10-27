@@ -666,6 +666,10 @@ model Material {
   // custo padrão estimado (pra sugerir no orçamento)
   defaultUnitCostCents Int @default(0)
 
+  // formação do preço de venda usado ao selecionar o material no orçamento
+  saleMarginPercent Float @default(0)
+  salePriceCents     Int   @default(0)
+
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())

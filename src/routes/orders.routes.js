@@ -10,10 +10,12 @@ const {
    deleteOrder,
    updateOrderFull,
 } = require("../controllers/orders.controller");
+const { orderReceiptPdf } = require("../controllers/ordersPdf.controller");
 
 router.use(requireAuth);
 
 router.get("/", listOrders);
+router.get("/:id/receipt.pdf", orderReceiptPdf);
 router.get("/:id", getOrder);
 router.post("/", createOrder);
 

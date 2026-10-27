@@ -87,7 +87,7 @@ function drawBar(doc, x, y, w, h, text, color) {
   doc.save();
   doc.roundedRect(x, y, w, h, 6).fill(color);
   doc
-    .fillColor("#ffffff")
+    .fillColor(color === "#FFD23F" ? "#24324A" : "#ffffff")
     .fontSize(10)
     .font("Helvetica-Bold")
     .text(text, x, y + 4, {
@@ -178,11 +178,13 @@ async function budgetPdf(req, res) {
   const doc = new PDFDocument({ size: "A4", margin: 0 });
   doc.pipe(res);
 
-  const BLUE = "#0866ff";
-  const BORDER = "#e6eaf2";
-  const SOFT = "#f8fafc";
-  const TEXT = "#0f172a";
-  const MUTED = "#64748b";
+  const BLUE = "#FFD23F";
+  const HEADER = "#24324A";
+  const CORAL = "#FF7043";
+  const BORDER = "#D9DDE5";
+  const SOFT = "#FFF9E7";
+  const TEXT = "#24324A";
+  const MUTED = "#69758A";
 
   const x0 = 40;
   const y0 = 30;
@@ -198,7 +200,8 @@ async function budgetPdf(req, res) {
   const headerH = 95;
   const headerY = y0;
 
-  doc.roundedRect(x0, headerY, w0, 74, 10).fill(BLUE);
+  doc.roundedRect(x0, headerY, w0, 74, 16).fill(HEADER);
+  doc.roundedRect(x0, headerY, 14, 74, 7).fill(CORAL);
 
   const logoX = x0 + 12;
   const logoY = headerY + 10;
@@ -219,7 +222,7 @@ async function budgetPdf(req, res) {
   const boxX = x0 + w0 - boxW - 12;
   const boxY = headerY + 12;
 
-  doc.roundedRect(boxX, boxY, boxW, boxH, 8).fillAndStroke("#ffffff", "#dbeafe");
+  doc.roundedRect(boxX, boxY, boxW, boxH, 10).fillAndStroke(BLUE, BLUE);
   doc
     .fillColor(MUTED)
     .font("Helvetica")
@@ -245,7 +248,7 @@ async function budgetPdf(req, res) {
     });
 
   doc
-    .fillColor("#dbeafe")
+    .fillColor("#DDE7F5")
     .font("Helvetica")
     .fontSize(10)
     .text("Orçamento comercial", titleLeft, headerY + 38, {
@@ -469,12 +472,15 @@ const ref12xCents = showRef12x
   ? Math.round(installmentTotalCents / 12)
   : 0;
 
+const isInstallment = budget.paymentMode === "PARCELADO";
 const valueRows = [
   { label: "Valor bruto", value: moneyBRL(grossTotalCents) },
   { label: "À vista", value: moneyBRL(cashTotalCents), strong: true },
-  { label: "Parcelado total", value: moneyBRL(installmentTotalCents), strong: true },
-  { label: "Parcelas", value: `${installmentsCount}x de ${moneyBRL(perInstallmentCents)}` },
-  ...(showRef12x
+  ...(isInstallment ? [
+    { label: "Parcelado total", value: moneyBRL(installmentTotalCents), strong: true },
+    { label: "Parcelas", value: `${installmentsCount}x de ${moneyBRL(perInstallmentCents)}` },
+  ] : []),
+  ...(isInstallment && showRef12x
     ? [{ label: "Referência em 12x", value: moneyBRL(ref12xCents) }]
     : []),
 ];

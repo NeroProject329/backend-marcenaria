@@ -189,6 +189,8 @@ async function listMaterials(req, res) {
       name: m.name,
       unit: m.unit,
       defaultUnitCostCents: m.defaultUnitCostCents,
+      saleMarginPercent: m.saleMarginPercent,
+      salePriceCents: m.salePriceCents,
       isActive: m.isActive,
       createdAt: m.createdAt,
       updatedAt: m.updatedAt,
@@ -218,7 +220,7 @@ async function listMaterials(req, res) {
 async function createMaterial(req, res) {
   const { salonId } = req.user;
 
-  const { name, unit, defaultUnitCostCents, isActive, suppliers } = req.body || {};
+  const { name, unit, defaultUnitCostCents, saleMarginPercent, salePriceCents, isActive, suppliers } = req.body || {};
 
   const n = String(name || "").trim();
   if (n.length < 2) return res.status(400).json({ message: "name é obrigatório (mín 2 caracteres)." });
@@ -231,6 +233,18 @@ async function createMaterial(req, res) {
     : { ok: true, value: 0 };
   if (!cost.ok) return res.status(400).json({ message: cost.message });
   if (cost.value < 0) return res.status(400).json({ message: "defaultUnitCostCents inválido." });
+
+  const margin = Number(saleMarginPercent ?? 0);
+  if (!Number.isFinite(margin) || margin < 0 || margin > 10000) {
+    return res.status(400).json({ message: "saleMarginPercent inválido." });
+  }
+  const computedSalePrice = Math.round(cost.value * (1 + margin / 100));
+  const salePrice = salePriceCents !== undefined
+    ? toInt(salePriceCents, "salePriceCents")
+    : { ok: true, value: computedSalePrice };
+  if (!salePrice.ok || salePrice.value < 0) {
+    return res.status(400).json({ message: salePrice.message || "salePriceCents inválido." });
+  }
 
   // --- valida suppliers ---
   const supplierList = Array.isArray(suppliers) ? suppliers : [];
@@ -268,6 +282,8 @@ async function createMaterial(req, res) {
         name: n,
         unit: unitNorm,
         defaultUnitCostCents: cost.value,
+        saleMarginPercent: margin,
+        salePriceCents: salePrice.value,
         isActive: isActive === undefined ? true : Boolean(isActive),
       },
       select: { id: true },
@@ -330,7 +346,7 @@ async function updateMaterial(req, res) {
   const exists = await prisma.material.findFirst({ where: { id, salonId }, select: { id: true } });
   if (!exists) return res.status(404).json({ message: "Material não encontrado." });
 
-  const { name, unit, defaultUnitCostCents, isActive, suppliers } = req.body || {};
+  const { name, unit, defaultUnitCostCents, saleMarginPercent, salePriceCents, isActive, suppliers } = req.body || {};
   const data = {};
 
   if (name !== undefined) {
@@ -350,6 +366,22 @@ async function updateMaterial(req, res) {
     if (!cost.ok) return res.status(400).json({ message: cost.message });
     if (cost.value < 0) return res.status(400).json({ message: "defaultUnitCostCents inválido." });
     data.defaultUnitCostCents = cost.value;
+  }
+
+  if (saleMarginPercent !== undefined) {
+    const margin = Number(saleMarginPercent);
+    if (!Number.isFinite(margin) || margin < 0 || margin > 10000) {
+      return res.status(400).json({ message: "saleMarginPercent inválido." });
+    }
+    data.saleMarginPercent = margin;
+  }
+
+  if (salePriceCents !== undefined) {
+    const salePrice = toInt(salePriceCents, "salePriceCents");
+    if (!salePrice.ok || salePrice.value < 0) {
+      return res.status(400).json({ message: salePrice.message || "salePriceCents inválido." });
+    }
+    data.salePriceCents = salePrice.value;
   }
 
   if (isActive !== undefined) data.isActive = Boolean(isActive);
