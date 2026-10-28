@@ -1,9 +1,16 @@
 const router = require("express").Router();
-const { register, login, me, googleAuth } = require("../controllers/auth.controller");
+const {
+  register,
+  login,
+  me,
+  googleAuth,
+  publicAuthConfig,
+} = require("../controllers/auth.controller");
 const { requireAuth } = require("../middlewares/auth.middleware");
 
 router.post("/register", register);
 router.post("/login", login);
+router.get("/config", publicAuthConfig);
 router.get("/me", requireAuth, me);
 router.post("/google", googleAuth);
 

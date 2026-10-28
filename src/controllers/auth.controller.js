@@ -10,6 +10,14 @@ function signToken({ userId, salonId }) {
   return jwt.sign({ userId, salonId }, process.env.JWT_SECRET, { expiresIn: "7d" });
 }
 
+function publicAuthConfig(req, res) {
+  const googleClientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+
+  return res.json({
+    googleClientId: googleClientId || null,
+  });
+}
+
 async function googleAuth(req, res) {
   try {
     const { credential, salonName } = req.body;
@@ -288,4 +296,4 @@ async function me(req, res) {
   return res.json({ user, subscription });
 }
 
-module.exports = { register, login, me ,  googleAuth};
+module.exports = { register, login, me, googleAuth, publicAuthConfig };
